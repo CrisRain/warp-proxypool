@@ -175,109 +175,123 @@ create_pool() {
             SOCKS_PORT_IN_NAMESPACE=40000
         fi
         echo "   - 步骤7/8: 在 ns$i 中初始化WARP (内部SOCKS5端口: $SOCKS_PORT_IN_NAMESPACE)..."
-        echo "     - (预清理) 尝试断开连接并删除旧注册..."
-        sudo ip netns exec ns$i warp-cli --accept-tos disconnect || true
-        sudo ip netns exec ns$i warp-cli --accept-tos registration delete || true
-        sleep 1 # 短暂等待清理命令完成
-        
-        # 检查并安装 nslookup（优先 busybox，次选 dnsutils）
-        if ! sudo ip netns exec ns$i command -v nslookup &> /dev/null; then
-            echo "     - nslookup 未安装，尝试安装 busybox..."
-            if sudo ip netns exec ns$i command -v apt-get &> /dev/null; then
-                sudo ip netns exec ns$i apt-get update && sudo ip netns exec ns$i apt-get install -y busybox
-            elif sudo ip netns exec ns$i command -v yum &> /dev/null; then
-                sudo ip netns exec ns$i yum install -y busybox
-            fi
-        fi
-        
-        # 检查外网连通性
-        if sudo ip netns exec ns$i command -v nslookup &> /dev/null; then
-            sudo ip netns exec ns$i nslookup api.cloudflareclient.com || echo "警告：命名空间 ns$i 无法解析域名，WARP 连接可能失败。"
-        else
-            echo "警告：nslookup 依然未安装，无法检测 DNS。"
-        fi
+        # --- 开始串行化操作 ---
+        # 为了避免多个warp-cli实例同时操作全局配置文件导致冲突，
+        # 我们在这里引入一个简单的文件锁机制。
+        (
+            flock -x 200 # 获取排他锁
 
-        echo "     - 强制清理残留的 socket 文件 (如果存在)..."
-        sudo ip netns exec ns$i rm -f /run/cloudflare-warp/warp_service || true
+            echo "     - (预清理) 尝试断开连接并删除旧注册..."
+            # 在独立的命名空间内执行清理和注册
+            sudo ip netns exec ns$i bash -c "
+                set -euo pipefail
+                
+                # 断开并删除旧注册
+                warp-cli --accept-tos disconnect || true
+                warp-cli --accept-tos registration delete || true
+                sleep 2 # 等待清理完成
 
-        echo "     - 启动WARP服务守护进程..."
-        sudo ip netns exec ns$i warp-svc &
-        sleep 4 # 给 warp-svc 更多启动时间，避免服务未就绪
+                # 检查并安装 nslookup
+                if ! command -v nslookup &> /dev/null; then
+                    echo '     - nslookup 未安装，尝试安装 busybox...'
+                    if command -v apt-get &> /dev/null; then
+                        apt-get update >/dev/null && apt-get install -y busybox >/dev/null
+                    elif command -v yum &> /dev/null; then
+                        yum install -y busybox >/dev/null
+                    fi
+                fi
+                
+                # 检查外网连通性
+                if command -v nslookup &> /dev/null; then
+                    if ! nslookup api.cloudflareclient.com; then
+                        echo '错误：命名空间 ns$i 无法解析域名，请检查网络配置。' >&2
+                        exit 1
+                    fi
+                else
+                    echo '警告：nslookup 依然未安装，无法检测 DNS。'
+                fi
 
-        echo "     - 等待WARP服务IPC Socket就绪..."
-        MAX_SVC_WAIT_ATTEMPTS=15
-        SVC_WAIT_COUNT=0
-        SVC_READY=false
-        while [ $SVC_WAIT_COUNT -lt $MAX_SVC_WAIT_ATTEMPTS ]; do
-            if sudo ip netns exec ns$i test -S /run/cloudflare-warp/warp_service; then
-                echo "       WARP服务IPC Socket已就绪。"
-                SVC_READY=true
-                break
-            fi
-            echo "       等待中... (尝试 $((SVC_WAIT_COUNT+1))/$MAX_SVC_WAIT_ATTEMPTS)"
-            sleep 2
-            SVC_WAIT_COUNT=$((SVC_WAIT_COUNT+1))
-        done
+                echo '     - 强制清理残留的 socket 文件 (如果存在)...'
+                rm -f /run/cloudflare-warp/warp_service || true
 
-        if [ "$SVC_READY" = false ]; then
-            echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
-            sudo ip netns exec ns$i ps aux | grep warp || true
-            exit 1
-        fi
+                echo '     - 启动WARP服务守护进程...'
+                warp-svc &
+                sleep 5 # 给 warp-svc 更多启动时间
 
-        echo "     - 注册WARP并接受服务条款 (TOS)..."
-        # 尝试注册，如果失败则检查是否已注册，否则退出
-        if ! sudo ip netns exec ns$i warp-cli --accept-tos registration new; then
-             # 检查是否是因为已经注册导致的失败 (检查状态是否包含 Account type 或类似信息)
-             # 不同版本的 warp-cli 输出可能略有不同，这里用一个比较通用的检查
-             if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -qiE "(Account type:|Status: Registered|Status: Connected)"; then
-                 echo "   ℹ️  WARP 已注册或连接，继续..."
-             else
-                 echo "错误：注册WARP失败。请检查 warp-svc 是否正常运行，以及网络连接。" >&2
-                 sudo ip netns exec ns$i warp-cli --accept-tos status >&2
-                 sudo ip netns exec ns$i ps aux | grep warp || true
-                 exit 1
-             fi
-        else
-            echo "   ✅ WARP新注册成功。"
-        fi
-        
-        echo "     - 设置WARP为SOCKS5代理模式..."
-        sudo ip netns exec ns$i warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
-        
-        # 如果定义了自定义端口，则尝试设置它
-        if [ -n "$CUSTOM_PROXY_PORT" ]; then
-            echo "     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT..."
-            sudo ip netns exec ns$i warp-cli --accept-tos proxy port "$CUSTOM_PROXY_PORT" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
-        fi
-        
-        if [ -n "$WARP_LICENSE_KEY" ]; then
-            echo "     - 尝试使用许可证密钥升级到WARP+..."
-            sudo ip netns exec ns$i warp-cli --accept-tos registration license "$WARP_LICENSE_KEY" || echo "警告：许可证密钥设置失败。"
-        fi
+                echo '     - 等待WARP服务IPC Socket就绪...'
+                MAX_SVC_WAIT_ATTEMPTS=15
+                SVC_WAIT_COUNT=0
+                while [ \$SVC_WAIT_COUNT -lt \$MAX_SVC_WAIT_ATTEMPTS ]; do
+                    if test -S /run/cloudflare-warp/warp_service; then
+                        echo '       WARP服务IPC Socket已就绪。'
+                        break
+                    fi
+                    echo '       等待中... (尝试 '`expr \$SVC_WAIT_COUNT + 1`'/'\$MAX_SVC_WAIT_ATTEMPTS')'
+                    sleep 2
+                    SVC_WAIT_COUNT=`expr \$SVC_WAIT_COUNT + 1`
+                done
 
-        if [ -n "$WARP_ENDPOINT" ]; then
-            echo "     - 设置自定义WARP端点: $WARP_ENDPOINT..."
-            sudo ip netns exec ns$i warp-cli --accept-tos tunnel endpoint reset || echo "警告：重置端点失败。"
-            sudo ip netns exec ns$i warp-cli --accept-tos tunnel endpoint set "$WARP_ENDPOINT" || echo "警告：设置自定义端点失败。"
-        fi
+                if ! test -S /run/cloudflare-warp/warp_service; then
+                    echo '错误：等待WARP服务 (warp-svc) 超时。' >&2
+                    ps aux | grep warp || true
+                    exit 1
+                fi
 
-        echo "     - 连接WARP..."
-        sudo ip netns exec ns$i warp-cli --accept-tos connect || { echo "错误：连接WARP失败。" >&2; exit 1; }
-        
+                echo '     - 注册WARP并接受服务条款 (TOS)...'
+                if ! warp-cli --accept-tos registration new; then
+                     if warp-cli --accept-tos status | grep -qiE '(Account type:|Status: Registered|Status: Connected)'; then
+                         echo '   ℹ️  WARP 已注册或连接，继续...'
+                     else
+                         echo '错误：注册WARP失败。请检查 warp-svc 是否正常运行，以及网络连接。' >&2
+                         warp-cli --accept-tos status >&2
+                         ps aux | grep warp || true
+                         exit 1
+                     fi
+                else
+                    echo '   ✅ WARP新注册成功。'
+                fi
+                
+                echo '     - 设置WARP为SOCKS5代理模式...'
+                warp-cli --accept-tos mode proxy
+                
+                if [ -n \"$CUSTOM_PROXY_PORT\" ]; then
+                    echo \"     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT...\"
+                    warp-cli --accept-tos proxy port \"$CUSTOM_PROXY_PORT\" || echo '警告：设置自定义代理端口失败，可能warp-cli版本不支持。'
+                fi
+                
+                if [ -n \"$WARP_LICENSE_KEY\" ]; then
+                    echo '     - 尝试使用许可证密钥升级到WARP+...'
+                    warp-cli --accept-tos registration license \"$WARP_LICENSE_KEY\" || echo '警告：许可证密钥设置失败。'
+                fi
+
+                if [ -n \"$WARP_ENDPOINT\" ]; then
+                    echo \"     - 设置自定义WARP端点: $WARP_ENDPOINT...\"
+                    warp-cli --accept-tos tunnel endpoint reset || echo '警告：重置端点失败。'
+                    warp-cli --accept-tos tunnel endpoint set \"$WARP_ENDPOINT\" || echo '警告：设置自定义端点失败。'
+                fi
+
+                echo '     - 连接WARP...'
+                warp-cli --accept-tos connect
+            " || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
+
+            # 释放锁
+            flock -u 200
+
+        ) 200>/var/lock/warp_pool.lock # 定义锁文件
+
         echo "     - 等待WARP连接成功..."
-        MAX_CONNECT_WAIT_ATTEMPTS=10
+        MAX_CONNECT_WAIT_ATTEMPTS=15 # 增加等待次数
         CONNECT_WAIT_COUNT=0
         CONNECTED=false
         while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
-            # 兼容多种 warp-cli 输出
-            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -Eqi "Connected|Registered|Account type"; then
+            # 使用更严格的检查，只寻找 "Connected" 状态
+            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -q "Status: Connected"; then
                 CONNECTED=true
                 break
             fi
-            CURRENT_STATUS=$(sudo ip netns exec ns$i warp-cli --accept-tos status || echo "Status: Error fetching status")
+            CURRENT_STATUS=$(sudo ip netns exec ns$i warp-cli --accept-tos status | grep "Status:" || echo "Status: Error fetching status")
             echo "       等待连接中... (尝试 $((CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) 当前状态: $CURRENT_STATUS"
-            sleep 3 # 增加等待时间
+            sleep 4 # 增加等待时间
             CONNECT_WAIT_COUNT=$((CONNECT_WAIT_COUNT+1))
         done
 
