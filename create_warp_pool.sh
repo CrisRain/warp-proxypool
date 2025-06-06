@@ -202,11 +202,6 @@ EOF
                 WARP_LICENSE_KEY="$3"
                 WARP_ENDPOINT="$4"
                 
-                echo "     - (预清理) 尝试断开连接并删除旧注册..."
-                warp-cli --accept-tos disconnect || true
-                warp-cli --accept-tos registration delete || true
-                sleep 1
-
                 # 检查外网连通性
                 echo "     - 检查外网连通性..."
                 # 使用 ping 代替 nslookup 进行连通性测试，-c 1 表示只发送一个包
@@ -240,6 +235,11 @@ EOF
                     sleep 2
                 done
                 echo "       WARP服务IPC Socket已就绪。"
+
+                echo "     - (预清理) 尝试断开连接并删除旧注册..."
+                warp-cli --accept-tos disconnect || true
+                warp-cli --accept-tos registration delete || true
+                sleep 1
 
                 echo "     - 注册WARP并接受服务条款 (TOS)..."
                 if ! warp-cli --accept-tos registration new; then
