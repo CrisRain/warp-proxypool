@@ -1,33 +1,34 @@
 import threading
 import subprocess
 import time
+import os
 from queue import Queue
 from flask import Flask, jsonify, request
 import socket
 import struct
-import socks  # For connecting to backend SOCKS5 WARP (pip install PySocks)
+import socks  # 用于连接后端的SOCKS5 WARP服务 (pip install PySocks)
 
 app = Flask(__name__)
 
-# --- Logging ---
+# --- 日志记录 ---
 def log_message(message):
-    """Helper function for logging with a timestamp."""
+    """带时间戳的日志记录助手函数"""
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
 
-# --- SOCKS5 Server Configuration ---
-SOCKS_SERVER_HOST = '0.0.0.0'
-SOCKS_SERVER_PORT = 10880
+# --- SOCKS5 服务器配置 ---
+SOCKS_SERVER_HOST = os.environ.get('SOCKS_HOST', '0.0.0.0')
+SOCKS_SERVER_PORT = int(os.environ.get('SOCKS_PORT', 10880))
 SOCKS_VERSION = 5
-# SOCKS5 CMD
+# SOCKS5 命令
 CMD_CONNECT = 0x01
-# SOCKS5 ATYP
+# SOCKS5 地址类型
 ATYP_IPV4 = 0x01
 ATYP_DOMAINNAME = 0x03
 ATYP_IPV6 = 0x04
-# SOCKS5 Reply Codes (status)
+# SOCKS5 回复状态码
 REP_SUCCESS = 0x00
 REP_GENERAL_FAILURE = 0x01
-REP_CONNECTION_NOT_ALLOWED = 0x02 # ruleset
+REP_CONNECTION_NOT_ALLOWED = 0x02
 REP_NETWORK_UNREACHABLE = 0x03
 REP_HOST_UNREACHABLE = 0x04
 REP_CONNECTION_REFUSED = 0x05
@@ -36,100 +37,98 @@ REP_COMMAND_NOT_SUPPORTED = 0x07
 REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 
 
-# --- Backend WARP Proxy Pool Configuration ---
-# Note: These should align with your create_warp_pool.sh script
-POOL_SIZE = 5  # Number of WARP instances, should match NUM_INSTANCES in create_warp_pool.sh
-BACKEND_BASE_PORT = 40000 # Starting port for backend WARP SOCKS5 instances (e.g., 40000, 40001, ...)
-WARP_INSTANCE_IP = '127.0.0.1' # Backend WARP instances listen on localhost for the manager
-IP_REFRESH_WAIT = 5  # IP刷新等待时间(秒)
+# --- 后端 WARP 代理池配置 ---
+# 注意: 这些配置应与 create_warp_pool.sh 脚本保持一致
+POOL_SIZE = int(os.environ.get('POOL_SIZE', 3))
+BASE_PORT = int(os.environ.get('BASE_PORT', 10800))
+WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
+IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
 
-# 代理状态管理
-available_proxies = Queue() # Stores backend WARP ports (e.g., 40000, 40001)
-in_use_proxies = {} # Stores info about backend WARP ports in use (by SOCKS or API)
-proxy_lock = threading.Lock() # Lock for available_proxies and in_use_proxies
+# --- 代理状态管理 ---
+available_proxies = Queue() # 存储可用的后端WARP端口 (例如: 10800, 10801)
+in_use_proxies = {} # 存储正在被使用的后端WARP端口信息 (被SOCKS或API占用)
+proxy_lock = threading.Lock() # 用于保护 available_proxies 和 in_use_proxies 的线程锁
 
-# 初始化代理池 (stores backend WARP ports)
-log_message(f"Initializing backend proxy pool. Size: {POOL_SIZE}, Start Port: {BACKEND_BASE_PORT}")
+# --- 初始化代理池 ---
+log_message(f"初始化后端代理池... 代理数量: {POOL_SIZE}, 起始端口: {BASE_PORT}")
 for i in range(POOL_SIZE):
-    port_to_add = BACKEND_BASE_PORT + i
+    port_to_add = BASE_PORT + i
     available_proxies.put(port_to_add)
-    log_message(f"Added backend port {port_to_add} to available pool.")
+    log_message(f"已添加后端端口 {port_to_add} 到可用代理池。")
 
 def refresh_proxy_ip(backend_warp_port):
     """
-    Refreshes the IP address of the specified backend WARP proxy instance.
-    'backend_warp_port' is the port like 40000, 40001, etc.
+    刷新指定后端WARP代理实例的IP地址。
+    'backend_warp_port' 是像 10800, 10801 这样的端口。
     """
-    # Calculate the index based on the BACKEND_BASE_PORT
-    proxy_index = backend_warp_port - BACKEND_BASE_PORT
-    ns_name = f"ns{proxy_index}" # Assumes ns0, ns1, ... correspond to 40000, 40001, ...
+    proxy_index = backend_warp_port - BASE_PORT
+    ns_name = f"ns{proxy_index}" # 假设 ns0, ns1, ... 对应 10800, 10801, ...
     
-    log_message(f"Attempting to refresh IP for backend WARP on port {backend_warp_port} (namespace {ns_name})...")
+    log_message(f"正在尝试为端口 {backend_warp_port} (命名空间 {ns_name}) 刷新IP...")
     try:
-        # 断开WARP连接
-        log_message(f"Disconnecting WARP in {ns_name}...")
+        # 优先尝试断开重连
+        log_message(f"正在断开 {ns_name} 中的WARP连接...")
         subprocess.run(
             f"sudo ip netns exec {ns_name} warp-cli disconnect",
-            shell=True, check=True, timeout=15 # Increased timeout slightly
+            shell=True, check=True, timeout=20
         )
-        log_message(f"WARP disconnected in {ns_name}.")
-        
-        # 重新连接WARP
-        log_message(f"Connecting WARP in {ns_name}...")
+        log_message(f"正在重新连接 {ns_name} 中的WARP...")
         subprocess.run(
             f"sudo ip netns exec {ns_name} warp-cli connect",
-            shell=True, check=True, timeout=15 # Increased timeout slightly
+            shell=True, check=True, timeout=20
         )
-        log_message(f"WARP connected in {ns_name}.")
+        log_message(f"{ns_name} 中的WARP已重新连接。")
         
-        # 等待连接稳定
-        log_message(f"Waiting {IP_REFRESH_WAIT}s for WARP on port {backend_warp_port} ({ns_name}) to stabilize IP...")
+        log_message(f"等待 {IP_REFRESH_WAIT} 秒，让 {ns_name} (端口 {backend_warp_port}) 的IP稳定...")
         time.sleep(IP_REFRESH_WAIT)
-        log_message(f"IP for backend WARP on port {backend_warp_port} ({ns_name}) assumed refreshed.")
+        log_message(f"端口 {backend_warp_port} ({ns_name}) 的IP地址已刷新。")
         return True
-    except subprocess.TimeoutExpired as e_timeout:
-        log_message(f"Timeout during IP refresh for backend WARP on port {backend_warp_port} ({ns_name}): {e_timeout}")
-        return False
-    except subprocess.CalledProcessError as e_called:
-        log_message(f"CalledProcessError during IP refresh for backend WARP on port {backend_warp_port} ({ns_name}): {e_called}")
-        return False
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        log_message(f"{ns_name} 的断开重连操作失败: {e}。正在尝试重启 warp-svc 服务...")
+        try:
+            # 如果断开重连失败，尝试重启服务
+            subprocess.run(f"sudo ip netns exec {ns_name} pkill warp-svc", shell=True, check=True, timeout=10)
+            time.sleep(2)
+            subprocess.run(f"sudo ip netns exec {ns_name} warp-svc", shell=True, check=True, timeout=10)
+            time.sleep(IP_REFRESH_WAIT)
+            log_message(f"成功重启 {ns_name} 中的 warp-svc 服务。")
+            return True
+        except Exception as e_restart:
+            log_message(f"重启 {ns_name} 中的 warp-svc 服务失败: {e_restart}")
+            return False
     except Exception as e:
-        log_message(f"Generic failure during IP refresh for backend WARP on port {backend_warp_port} ({ns_name}): {str(e)}")
+        log_message(f"为端口 {backend_warp_port} ({ns_name}) 刷新IP时发生未知错误: {str(e)}")
         return False
 
 def _refresh_and_return_task(port_to_refresh):
     """
-    Refreshes the IP of a backend WARP proxy and returns it to the available pool.
-    This runs in a separate thread.
-    'port_to_refresh' is a backend WARP port (e.g., 40000).
+    在后台线程中刷新一个后端WARP代理的IP，并将其返回到可用代理池。
+    'port_to_refresh' 是一个后端WARP端口 (例如: 10800)。
     """
-    log_message(f"BG TASK: Initiating IP refresh for backend port {port_to_refresh}...")
+    log_message(f"后台任务: 开始为后端端口 {port_to_refresh} 刷新IP...")
     refreshed_successfully = refresh_proxy_ip(port_to_refresh)
     
-    # Always return the port to the pool, regardless of refresh success,
-    # so it doesn't get lost. The SOCKS server or API can decide what to do.
     with proxy_lock:
         available_proxies.put(port_to_refresh)
     
     if refreshed_successfully:
-        log_message(f"BG TASK: Backend port {port_to_refresh} returned to pool after successful IP refresh.")
+        log_message(f"后台任务: 后端端口 {port_to_refresh} 在成功刷新IP后已返回代理池。")
     else:
-        log_message(f"BG TASK: Backend port {port_to_refresh} returned to pool (IP refresh FAILED or was skipped).")
+        log_message(f"后台任务: 后端端口 {port_to_refresh} 已返回代理池 (IP刷新失败或被跳过)。")
 
 @app.route('/acquire', methods=['GET'])
 def acquire_proxy():
     """
-    Acquires a backend WARP port. The client should then use the central SOCKS5 server.
-    Returns the central SOCKS5 server address and the acquired backend port (as a token for release).
+    获取一个后端WARP端口。客户端应使用返回的中央SOCKS5服务器地址。
+    返回中央SOCKS5服务器地址和作为释放凭证的后端端口号。
     """
     with proxy_lock:
         if available_proxies.empty():
-            log_message(f"API /acquire: No available backend proxies for {request.remote_addr}")
-            return jsonify({"error": "No available backend proxies"}), 503
+            log_message(f"API /acquire: 没有可用的后端代理给 {request.remote_addr}")
+            return jsonify({"error": "没有可用的后端代理"}), 503
         
-        backend_port_acquired = available_proxies.get() # This is a backend WARP port, e.g., 40000
+        backend_port_acquired = available_proxies.get()
         
-        # Determine the IP address the client should use to connect to the central SOCKS server.
         client_facing_socks_host = request.host.split(':')[0]
         if SOCKS_SERVER_HOST != '0.0.0.0':
             client_facing_socks_host = SOCKS_SERVER_HOST
@@ -141,39 +140,36 @@ def acquire_proxy():
             "central_socks_server_advertised": f"{client_facing_socks_host}:{SOCKS_SERVER_PORT}",
             "backend_port_in_use": backend_port_acquired
         }
-        log_message(f"API /acquire: Backend WARP port {backend_port_acquired} acquired by {request.remote_addr}. "
-                    f"Client should use central SOCKS: {client_facing_socks_host}:{SOCKS_SERVER_PORT}")
+        log_message(f"API /acquire: 后端WARP端口 {backend_port_acquired} 已被 {request.remote_addr} 获取。 "
+                    f"客户端应使用中央SOCKS服务: {client_facing_socks_host}:{SOCKS_SERVER_PORT}")
         
         return jsonify({
             "proxy_to_use": f"socks5://{client_facing_socks_host}:{SOCKS_SERVER_PORT}",
             "backend_port_token_for_release": backend_port_acquired,
-            "message": f"Connect to the central SOCKS5 server at '{client_facing_socks_host}:{SOCKS_SERVER_PORT}'. "
-                       f"Use 'backend_port_token_for_release' ({backend_port_acquired}) when calling /release."
+            "message": f"请连接到中央SOCKS5服务器 '{client_facing_socks_host}:{SOCKS_SERVER_PORT}'。 "
+                       f"调用 /release 接口时请使用 'backend_port_token_for_release' ({backend_port_acquired})。"
         })
 
 @app.route('/release/<int:backend_port_token>', methods=['POST'])
 def release_proxy(backend_port_token):
     """
-    Releases a previously API-acquired backend WARP proxy (specified by backend_port_token)
-    and initiates IP refresh in a background thread.
+    释放一个先前通过API获取的后端WARP代理 (由 backend_port_token 指定)
+    并在后台线程中启动IP刷新。
     """
-    log_message(f"API /release: Request from {request.remote_addr} to release backend port token {backend_port_token}.")
+    log_message(f"API /release: 来自 {request.remote_addr} 的请求，释放后端端口凭证 {backend_port_token}。")
     with proxy_lock:
         if backend_port_token not in in_use_proxies:
-            log_message(f"API /release: Backend port token {backend_port_token} not found in in_use_proxies for {request.remote_addr}.")
-            return jsonify({"error": f"Backend port token {backend_port_token} not in use or invalid"}), 400
+            log_message(f"API /release: 在 'in_use_proxies' 中未找到后端端口凭证 {backend_port_token} (请求来源: {request.remote_addr})。")
+            return jsonify({"error": f"后端端口凭证 {backend_port_token} 未在使用或无效"}), 400
         
-        proxy_info = in_use_proxies.get(backend_port_token)
-        if not proxy_info or proxy_info.get("type") != "api_acquired":
-            log_message(f"API /release WARNING: Releasing port {backend_port_token} which might not be 'api_acquired'. Current type: {proxy_info.get('type') if proxy_info else 'N/A'}")
-
-        del in_use_proxies[backend_port_token]
-        log_message(f"API /release: Backend port {backend_port_token} removed from in_use_proxies by {request.remote_addr}.")
+        proxy_info = in_use_proxies.pop(backend_port_token)
+        usage_duration = time.time() - proxy_info.get("acquired_at", time.time())
+        log_message(f"API /release: 后端端口 {backend_port_token} 已被 {request.remote_addr} 释放。占用时长: {usage_duration:.2f} 秒。")
 
     threading.Thread(target=_refresh_and_return_task, args=(backend_port_token,)).start()
-    log_message(f"API /release: Background IP refresh task started for backend port {backend_port_token}.")
+    log_message(f"API /release: 已为后端端口 {backend_port_token} 启动后台IP刷新任务。")
     
-    return jsonify({"status": f"Release and IP refresh initiated for backend port {backend_port_token}"})
+    return jsonify({"status": f"已为后端端口 {backend_port_token} 发起释放和IP刷新流程"})
 
 @app.route('/status', methods=['GET'])
 def pool_status():
@@ -182,24 +178,23 @@ def pool_status():
         current_in_use_details = {}
         for port, info in in_use_proxies.items():
             info_copy = info.copy()
-            # Ensure client_address_on_socks_server is serializable if it exists
             if "client_address_on_socks_server" in info_copy and isinstance(info_copy["client_address_on_socks_server"], tuple):
                  info_copy["client_address_on_socks_server"] = f"{info_copy['client_address_on_socks_server'][0]}:{info_copy['client_address_on_socks_server'][1]}"
             current_in_use_details[port] = info_copy
 
         return jsonify({
-            "central_socks5_server_listening_on": f"{SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}",
-            "backend_warp_pool_size": POOL_SIZE,
-            "available_backend_ports_count": available_proxies.qsize(),
-            "available_backend_ports_list": list(available_proxies.queue),
-            "in_use_backend_ports_count": len(in_use_proxies),
-            "in_use_backend_ports_details": current_in_use_details
+            "central_socks5_server_listening_on": f"中央SOCKS5服务器监听地址: {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}",
+            "backend_warp_pool_size": f"后端WARP代理池大小: {POOL_SIZE}",
+            "available_backend_ports_count": f"可用后端代理数量: {available_proxies.qsize()}",
+            "available_backend_ports_list": f"可用后端代理端口列表: {list(available_proxies.queue)}",
+            "in_use_backend_ports_count": f"正在使用的后端代理数量: {len(in_use_proxies)}",
+            "in_use_backend_ports_details": f"正在使用的后端代理详情: {current_in_use_details}"
         })
 
-# --- SOCKS5 Server Implementation ---
+# --- SOCKS5 服务器实现 ---
 
 def _forward_data(source_sock, dest_sock, stop_event, direction_log):
-    """Forwards data between two sockets until an error or stop_event."""
+    """在两个套接字之间转发数据，直到发生错误或 stop_event 被设置。"""
     try:
         source_sock.settimeout(1.0) 
         while not stop_event.is_set():
@@ -209,61 +204,60 @@ def _forward_data(source_sock, dest_sock, stop_event, direction_log):
                 if stop_event.is_set(): break 
                 continue 
             except ConnectionResetError:
-                log_message(f"FORWARDER {direction_log}: Connection reset by peer.")
+                log_message(f"转发器 {direction_log}: 连接被对方重置。")
                 break
             except Exception as e:
                 if stop_event.is_set(): break 
-                log_message(f"FORWARDER {direction_log}: Error receiving data: {e}")
+                log_message(f"转发器 {direction_log}: 接收数据时出错: {e}")
                 break
             
             if not data:
-                log_message(f"FORWARDER {direction_log}: Connection closed by source (received empty data).")
+                log_message(f"转发器 {direction_log}: 源连接已关闭 (收到空数据)。")
                 break
             
             try:
                 dest_sock.sendall(data)
             except socket.error as e: 
                 if stop_event.is_set(): break
-                log_message(f"FORWARDER {direction_log}: Socket error sending data: {e}")
+                log_message(f"转发器 {direction_log}: 发送数据时套接字出错: {e}")
                 break
             except Exception as e:
                 if stop_event.is_set(): break
-                log_message(f"FORWARDER {direction_log}: Generic error sending data: {e}")
+                log_message(f"转发器 {direction_log}: 发送数据时发生未知错误: {e}")
                 break
     except Exception as e:
         if not stop_event.is_set(): 
-             log_message(f"FORWARDER {direction_log}: Unhandled exception in forwarding loop: {e}")
+             log_message(f"转发器 {direction_log}: 转发循环中发生未处理的异常: {e}")
     finally:
-        log_message(f"FORWARDER {direction_log}: Stopping.")
+        log_message(f"转发器 {direction_log}: 正在停止。")
         stop_event.set()
 
 def _release_backend_port_after_socks_usage(backend_port_to_release, refresh_ip_flag=True):
     """
-    Manages releasing a backend port after SOCKS usage.
-    Removes from in_use_proxies and optionally schedules IP refresh.
+    管理SOCKS使用后后端端口的释放。
+    从 in_use_proxies 中移除，并可选择性地安排IP刷新。
     """
-    log_message(f"SOCKS_CLEANUP: Releasing backend port {backend_port_to_release}. Refresh IP: {refresh_ip_flag}")
+    log_message(f"SOCKS清理: 正在释放后端端口 {backend_port_to_release}。刷新IP: {refresh_ip_flag}")
     with proxy_lock:
         if backend_port_to_release in in_use_proxies:
-            usage_type = in_use_proxies[backend_port_to_release].get("type", "unknown")
-            if usage_type != "socks_direct":
-                log_message(f"SOCKS_CLEANUP WARNING: Port {backend_port_to_release} type is '{usage_type}', not 'socks_direct'. Still releasing.")
-            del in_use_proxies[backend_port_to_release]
+            proxy_info = in_use_proxies.pop(backend_port_to_release)
+            usage_duration = time.time() - proxy_info.get("acquired_at", time.time())
+            log_message(f"SOCKS清理: 端口 {backend_port_to_release} 已被使用 {usage_duration:.2f} 秒。")
         else:
-            log_message(f"SOCKS_CLEANUP WARNING: Backend port {backend_port_to_release} not found in in_use_proxies during SOCKS release.")
+            log_message(f"SOCKS清理警告: 在SOCKS释放期间，未在 'in_use_proxies' 中找到后端端口 {backend_port_to_release}。")
 
     if refresh_ip_flag:
         threading.Thread(target=_refresh_and_return_task, args=(backend_port_to_release,)).start()
-        log_message(f"SOCKS_CLEANUP: Background IP refresh task started for {backend_port_to_release}.")
+        log_message(f"SOCKS清理: 已为 {backend_port_to_release} 启动后台IP刷新任务。")
     else:
         with proxy_lock:
             available_proxies.put(backend_port_to_release)
-        log_message(f"SOCKS_CLEANUP: Backend port {backend_port_to_release} returned to pool (IP refresh skipped).")
+        log_message(f"SOCKS清理: 后端端口 {backend_port_to_release} 已返回代理池 (IP刷新被跳过)。")
 
 def handle_socks_client_connection(client_socket, client_address_tuple):
-    """Handles a single SOCKS5 client connection."""
+    """处理单个SOCKS5客户端连接。"""
     client_ip_str = client_address_tuple[0]
-    log_message(f"SOCKS_HANDLER: New client connection from {client_ip_str}:{client_address_tuple[1]}")
+    log_message(f"SOCKS处理器: 来自 {client_ip_str}:{client_address_tuple[1]} 的新客户端连接")
     
     acquired_backend_port = None 
     remote_connection_to_target = None 
@@ -272,28 +266,28 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
         client_socket.settimeout(10.0) 
         ver_nmethods = client_socket.recv(2)
         if not ver_nmethods or ver_nmethods[0] != SOCKS_VERSION:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Invalid SOCKS version. Expected {SOCKS_VERSION}, got {ver_nmethods[0] if ver_nmethods else 'None'}.")
+            log_message(f"SOCKS处理器 {client_ip_str}: 无效的SOCKS版本。应为 {SOCKS_VERSION}, 收到 {ver_nmethods[0] if ver_nmethods else 'None'}。")
             return 
         
         num_auth_methods = ver_nmethods[1]
         auth_methods_offered = client_socket.recv(num_auth_methods)
         if b'\x00' not in auth_methods_offered: 
-            log_message(f"SOCKS_HANDLER {client_ip_str}: No supported authentication method. Offered: {auth_methods_offered.hex()}. We need 0x00.")
+            log_message(f"SOCKS处理器 {client_ip_str}: 不支持的认证方法。客户端提供: {auth_methods_offered.hex()}。我们需要 0x00 (无认证)。")
             client_socket.sendall(struct.pack("!BB", SOCKS_VERSION, 0xFF)) 
             return
         
         client_socket.sendall(struct.pack("!BB", SOCKS_VERSION, 0x00)) 
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Handshake successful (No Auth).")
+        log_message(f"SOCKS处理器 {client_ip_str}: 握手成功 (无认证)。")
 
         request_header = client_socket.recv(4) 
         if not request_header or request_header[0] != SOCKS_VERSION:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Invalid SOCKS version in request.")
+            log_message(f"SOCKS处理器 {client_ip_str}: 请求中的SOCKS版本无效。")
             return
         
         req_ver, req_cmd, req_rsv, req_atyp = request_header
         
         if req_cmd != CMD_CONNECT:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Unsupported command {req_cmd}. Only CONNECT ({CMD_CONNECT}) is supported.")
+            log_message(f"SOCKS处理器 {client_ip_str}: 不支持的命令 {req_cmd}。仅支持 CONNECT ({CMD_CONNECT})。")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_COMMAND_NOT_SUPPORTED, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             return
@@ -310,34 +304,34 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             addr_bytes = client_socket.recv(16)
             target_host_str = socket.inet_ntop(socket.AF_INET6, addr_bytes)
         else:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Unsupported address type {req_atyp}.")
+            log_message(f"SOCKS处理器 {client_ip_str}: 不支持的地址类型 {req_atyp}。")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_ADDRESS_TYPE_NOT_SUPPORTED, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             return
             
         target_port_bytes = client_socket.recv(2)
         target_port_int = struct.unpack("!H", target_port_bytes)[0]
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Request CONNECT to {target_host_str}:{target_port_int}")
+        log_message(f"SOCKS处理器 {client_ip_str}: 请求连接到 {target_host_str}:{target_port_int}")
 
         with proxy_lock:
             if available_proxies.empty():
-                log_message(f"SOCKS_HANDLER {client_ip_str}: No backend WARP proxies available for -> {target_host_str}:{target_port_int}")
+                log_message(f"SOCKS处理器 {client_ip_str}: 没有可用的后端WARP代理来连接 -> {target_host_str}:{target_port_int}")
                 reply = struct.pack("!BBBB", SOCKS_VERSION, REP_GENERAL_FAILURE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0) 
                 client_socket.sendall(reply)
                 return
             acquired_backend_port = available_proxies.get() 
             in_use_proxies[acquired_backend_port] = {
                 "type": "socks_direct",
-                "client_address_on_socks_server": client_address_tuple, # Store the tuple directly
+                "client_address_on_socks_server": client_address_tuple,
                 "requested_target_host": target_host_str,
                 "requested_target_port": target_port_int,
                 "backend_warp_port_used": acquired_backend_port,
                 "acquired_at": time.time()
             }
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Acquired backend WARP {WARP_INSTANCE_IP}:{acquired_backend_port} for -> {target_host_str}:{target_port_int}")
+        log_message(f"SOCKS处理器 {client_ip_str}: 已获取后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 用于连接 -> {target_host_str}:{target_port_int}")
 
         try:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Connecting to ({target_host_str}, {target_port_int}) via backend SOCKS5 {WARP_INSTANCE_IP}:{acquired_backend_port}...")
+            log_message(f"SOCKS处理器 {client_ip_str}: 正在通过后端SOCKS5 {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 ({target_host_str}, {target_port_int})...")
             remote_connection_to_target = socks.create_connection(
                 (target_host_str, target_port_int), 
                 proxy_type=socks.SOCKS5,
@@ -345,7 +339,7 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
                 proxy_port=acquired_backend_port, 
                 timeout=20 
             )
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Successfully connected to {target_host_str}:{target_port_int} via backend WARP {WARP_INSTANCE_IP}:{acquired_backend_port}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 已通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 成功连接到 {target_host_str}:{target_port_int}")
             
             bound_addr_bytes = socket.inet_aton("0.0.0.0") 
             bound_port_bytes = struct.pack("!H", 0) 
@@ -353,7 +347,7 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             client_socket.sendall(reply)
 
         except socks.ProxyConnectionError as e_pysocks: 
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Backend WARP {WARP_INSTANCE_IP}:{acquired_backend_port} could not connect to target {target_host_str}:{target_port_int}. PySocks Error: {e_pysocks}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 无法连接到目标 {target_host_str}:{target_port_int}。PySocks错误: {e_pysocks}")
             socks_reply_code = REP_HOST_UNREACHABLE 
             if "Connection refused" in str(e_pysocks): socks_reply_code = REP_CONNECTION_REFUSED
             elif "Host unreachable" in str(e_pysocks): socks_reply_code = REP_HOST_UNREACHABLE
@@ -364,35 +358,35 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             acquired_backend_port = None 
             return
         except socket.timeout: 
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Timeout connecting to {target_host_str}:{target_port_int} via backend WARP {WARP_INSTANCE_IP}:{acquired_backend_port}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 超时")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_TTL_EXPIRED, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
         except socket.gaierror as e_dns: 
-            log_message(f"SOCKS_HANDLER {client_ip_str}: DNS resolution failed for target {target_host_str}. Error: {e_dns}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 目标 {target_host_str} 的DNS解析失败。错误: {e_dns}")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_HOST_UNREACHABLE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
         except Exception as e_conn_target: 
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Generic error connecting to {target_host_str}:{target_port_int} via backend WARP {WARP_INSTANCE_IP}:{acquired_backend_port}. Error: {e_conn_target}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 时发生未知错误。错误: {e_conn_target}")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_GENERAL_FAILURE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
 
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Relaying data between client and {target_host_str}:{target_port_int} (via backend {acquired_backend_port})")
+        log_message(f"SOCKS处理器 {client_ip_str}: 正在客户端和 {target_host_str}:{target_port_int} (通过后端 {acquired_backend_port}) 之间中继数据")
         client_socket.settimeout(None) 
         remote_connection_to_target.settimeout(None)
 
         stop_event = threading.Event()
         
-        thread_client_to_target = threading.Thread(target=_forward_data, args=(client_socket, remote_connection_to_target, stop_event, f"Client({client_ip_str})->Target({target_host_str})"))
-        thread_target_to_client = threading.Thread(target=_forward_data, args=(remote_connection_to_target, client_socket, stop_event, f"Target({target_host_str})->Client({client_ip_str})"))
+        thread_client_to_target = threading.Thread(target=_forward_data, args=(client_socket, remote_connection_to_target, stop_event, f"客户端({client_ip_str})->目标({target_host_str})"))
+        thread_target_to_client = threading.Thread(target=_forward_data, args=(remote_connection_to_target, client_socket, stop_event, f"目标({target_host_str})->客户端({client_ip_str})"))
         
         thread_client_to_target.daemon = True 
         thread_target_to_client.daemon = True
@@ -401,45 +395,45 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
         
         stop_event.wait() 
 
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Data relay finished for <-> {target_host_str}:{target_port_int} (Backend {acquired_backend_port}).")
+        log_message(f"SOCKS处理器 {client_ip_str}: 与 {target_host_str}:{target_port_int} (后端 {acquired_backend_port}) 的数据中继已完成。")
 
     except ConnectionResetError:
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Client reset connection during operation.")
+        log_message(f"SOCKS处理器 {client_ip_str}: 客户端在操作期间重置了连接。")
     except BrokenPipeError: 
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Broken pipe (client likely closed connection).")
+        log_message(f"SOCKS处理器 {client_ip_str}: 管道破裂 (客户端可能已关闭连接)。")
     except socket.timeout: 
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Socket timeout during initial handshake/request phase.")
+        log_message(f"SOCKS处理器 {client_ip_str}: 在初始握手/请求阶段套接字超时。")
     except Exception as e_handler:
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Unhandled error in client handler: {e_handler}")
+        log_message(f"SOCKS处理器 {client_ip_str}: 客户端处理器中发生未处理的错误: {e_handler}")
         import traceback
         log_message(traceback.format_exc())
     finally:
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Cleaning up SOCKS connection.")
+        log_message(f"SOCKS处理器 {client_ip_str}: 正在清理SOCKS连接。")
         if remote_connection_to_target:
             try:
                 remote_connection_to_target.close()
             except Exception as e_close_remote:
-                log_message(f"SOCKS_HANDLER {client_ip_str}: Error closing remote_connection_to_target: {e_close_remote}")
+                log_message(f"SOCKS处理器 {client_ip_str}: 关闭到目标的连接时出错: {e_close_remote}")
         try:
             client_socket.close()
         except Exception as e_close_client:
-            log_message(f"SOCKS_HANDLER {client_ip_str}: Error closing client_socket: {e_close_client}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 关闭客户端连接时出错: {e_close_client}")
         
         if acquired_backend_port is not None: 
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=True)
         
-        log_message(f"SOCKS_HANDLER {client_ip_str}: Connection fully closed and resources handled.")
+        log_message(f"SOCKS处理器 {client_ip_str}: 连接已完全关闭，资源已处理。")
 
 def start_central_socks5_server():
-    """Initializes and starts the SOCKS5 proxy server, listening for client connections."""
+    """初始化并启动SOCKS5代理服务器，监听客户端连接。"""
     listener_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
     try:
         listener_socket.bind((SOCKS_SERVER_HOST, SOCKS_SERVER_PORT))
         listener_socket.listen(128) 
-        log_message(f"Central SOCKS5 server successfully started, listening on {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}")
+        log_message(f"中央SOCKS5服务器已成功启动，监听地址 {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}")
     except Exception as e_bind:
-        log_message(f"CRITICAL_ERROR: Could not bind or start SOCKS5 server on {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}. Error: {e_bind}")
+        log_message(f"严重错误: 无法在 {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT} 上绑定或启动SOCKS5服务器。错误: {e_bind}")
         return 
 
     while True: 
@@ -452,32 +446,32 @@ def start_central_socks5_server():
             client_handler_thread.daemon = True 
             client_handler_thread.start()
         except Exception as e_accept:
-            log_message(f"SOCKS_SERVER_LOOP: Error accepting new client connection: {e_accept}")
-            time.sleep(0.01) # Avoid busy-looping on persistent accept errors
-# --- Main Application Execution ---
+            log_message(f"SOCKS服务器主循环: 接受新客户端连接时出错: {e_accept}")
+            time.sleep(0.01)
+# --- 主程序执行 ---
 if __name__ == '__main__':
-    log_message("Proxy Manager Service is starting...")
-    log_message("Important: This script may use 'sudo' for 'ip netns exec warp-cli' commands during IP refresh.")
-    log_message("Please ensure that PySocks is installed: 'pip install PySocks'")
-    log_message(f"Current backend WARP pool size: {POOL_SIZE}, Base Port for backends: {BACKEND_BASE_PORT}")
-    log_message(f"Initial available backend ports in queue: {list(available_proxies.queue)}")
+    log_message("代理管理器服务正在启动...")
+    log_message("重要提示: 本脚本在刷新IP时可能会使用 'sudo' 执行 'ip netns exec warp-cli' 命令。")
+    log_message("请确保已安装 PySocks: 'pip install PySocks'")
+    log_message(f"当前后端WARP代理池大小: {POOL_SIZE}, 后端基础端口: {BASE_PORT}")
+    log_message(f"队列中初始可用的后端端口: {list(available_proxies.queue)}")
 
-    # Start the Central SOCKS5 Server in a separate daemon thread
-    log_message(f"Initiating Central SOCKS5 server thread to listen on {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}...")
+    # 在独立的守护线程中启动中央SOCKS5服务器
+    log_message(f"正在启动中央SOCKS5服务器线程，监听地址 {SOCKS_SERVER_HOST}:{SOCKS_SERVER_PORT}...")
     socks_server_daemon_thread = threading.Thread(target=start_central_socks5_server, daemon=True)
     socks_server_daemon_thread.start()
     
-    # Basic check if thread started (doesn't guarantee server is bound and listening)
     if socks_server_daemon_thread.is_alive():
-        log_message("Central SOCKS5 server thread has been started.")
+        log_message("中央SOCKS5服务器线程已启动。")
     else:
-        log_message("Warning: Central SOCKS5 server thread was initiated but may not be running (check logs for bind errors).")
+        log_message("警告: 中央SOCKS5服务器线程已初始化，但可能未在运行 (请检查日志中的绑定错误)。")
 
-    # Start the Flask HTTP API server
-    log_message(f"Starting Flask HTTP API server on host 0.0.0.0, port 5000.")
+    # 启动 Flask HTTP API 服务器
+    api_port = int(os.environ.get('API_PORT', 5000))
+    log_message(f"正在启动 Flask HTTP API 服务器，监听地址 0.0.0.0, 端口 {api_port}。")
     try:
-        app.run(host='0.0.0.0', port=5000, threaded=True)
+        app.run(host='0.0.0.0', port=api_port, threaded=True)
     except Exception as e_flask:
-        log_message(f"CRITICAL_ERROR: Flask API server failed to start: {e_flask}")
+        log_message(f"严重错误: Flask API 服务器启动失败: {e_flask}")
     
-    log_message("Proxy Manager Service is shutting down or Flask server exited.")
+    log_message("代理管理器服务正在关闭或 Flask 服务器已退出。")
