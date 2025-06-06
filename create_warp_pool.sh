@@ -140,18 +140,9 @@ create_pool() {
             # 1.5. 为命名空间配置DNS解析
             echo "   - 步骤1.5/8: 为 ns$i 配置DNS..."
             sudo mkdir -p "/etc/netns/ns$i"
-            # 检查主机的resolv.conf是否有效且不包含本地回环地址
-            if [ -s /etc/resolv.conf ] && ! grep -q "127.0.0." /etc/resolv.conf; then
-                sudo cp /etc/resolv.conf "/etc/netns/ns$i/resolv.conf"
-                echo "   ✅ 已从主机复制有效的DNS配置。"
-            else
-                if [ -s /etc/resolv.conf ]; then
-                    echo "   ⚠️  主机的DNS配置可能指向本地回环地址，不适用于命名空间。将使用公共DNS。"
-                fi
-                echo "nameserver 1.1.1.1" | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
-                echo "nameserver 8.8.8.8" | sudo tee -a "/etc/netns/ns$i/resolv.conf" > /dev/null
-                echo "   ✅ 已配置公共DNS (1.1.1.1, 8.8.8.8)。"
-            fi
+            # 根据您的要求，强制使用 1.1.1.1 作为 DNS
+            echo "nameserver 1.1.1.1" | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
+            echo "   ✅ 已强制配置DNS为 1.1.1.1。"
 
             # 2. 创建虚拟以太网设备对
             echo "   - 步骤2/8: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
