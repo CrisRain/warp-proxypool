@@ -9,6 +9,14 @@ set -euo pipefail
 POOL_SIZE=5      # 代理池大小，即创建多少个WARP实例
 BASE_PORT=10800  # SOCKS5代理的基础端口号，每个WARP实例的SOCKS5端口将在此基础上递增
 
+# WARP+ 许可证密钥 (可选, 如果你有的话)
+# 获取方法: 手机上使用1.1.1.1 App，菜单 -> 账户 -> 按键
+WARP_LICENSE_KEY=""
+
+# 自定义WARP端点IP和端口 (可选, 例如: 162.159.192.1:2408)
+# 可以从这里找到优选IP: https://stock.hostmonit.com/CloudFlareYes
+WARP_ENDPOINT=""
+
 # --- 前置检查 ---
 # 检查 warp-cli 命令是否存在
 if ! command -v warp-cli &> /dev/null; then
@@ -44,19 +52,20 @@ while sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/n
 done
 
 # 2. 清理每个实例的 DNAT 和 FORWARD 规则
+# WARP内置SOCKS5代理默认端口为40000，这里保持一致
+SOCKS_PORT_IN_NAMESPACE=40000
 for i in $(seq 0 $(($POOL_SIZE-1))); do
     HOST_PORT=$((BASE_PORT + $i))
     NAMESPACE_IP="10.0.0.$((i+2))"
-    SOCKS_PORT=1080 # 与创建时保持一致
 
     # 清理 DNAT 规则
-    while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT &> /dev/null; do
-        sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT
+    while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; do
+        sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE
     done
 
     # 清理 FORWARD 规则
-    while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT &> /dev/null; do
-        sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT
+    while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT &> /dev/null; do
+        sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT
     done
 done
 echo "   ✅ 旧的iptables规则已清理。"
@@ -85,43 +94,36 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     echo "-----------------------------------------------------"
 
     # 1. 创建网络命名空间
-    echo "   - 步骤1/9: 创建网络命名空间 ns$i..."
+    echo "   - 步骤1/8: 创建网络命名空间 ns$i..."
     sudo ip netns add ns$i || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
     echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
     # 2. 创建虚拟以太网设备对 (veth pair)
-    # veth$i 在主命名空间, veth${i}-ns 在 ns$i 命名空间
-    echo "   - 步骤2/9: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
+    echo "   - 步骤2/8: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
     sudo ip link add veth$i type veth peer name veth${i}-ns || { echo "错误：创建虚拟以太网设备对 veth$i <--> veth${i}-ns 失败。" >&2; exit 1; }
     echo "   ✅ 虚拟以太网设备对创建成功。"
 
     # 3. 配置虚拟以太网设备
-    echo "   - 步骤3/9: 配置虚拟以太网设备..."
-    # 将 veth${i}-ns 移入网络命名空间 ns$i
+    echo "   - 步骤3/8: 配置虚拟以太网设备..."
     sudo ip link set veth${i}-ns netns ns$i || { echo "错误：将 veth${i}-ns 移入 ns$i 失败。" >&2; exit 1; }
-    # 为命名空间内的 veth${i}-ns 分配IP地址
-    sudo ip netns exec ns$i ip addr add 10.0.0.$((i+2))/24 dev veth${i}-ns || { echo "错误：为 veth${i}-ns@ns$i 分配IP地址失败。" >&2; exit 1; } # IP段调整为10.0.0.(i+2) 避免与网关冲突
-    # 为主机上的 veth$i 分配IP地址 (作为 ns$i 的网关)
-    sudo ip addr add 10.0.0.1/24 dev veth$i || { echo "错误：为 veth$i 分配IP地址失败。" >&2; exit 1; } # 网关固定为10.0.0.1
+    NAMESPACE_IP="10.0.0.$((i+2))"
+    sudo ip netns exec ns$i ip addr add $NAMESPACE_IP/24 dev veth${i}-ns || { echo "错误：为 veth${i}-ns@ns$i 分配IP地址失败。" >&2; exit 1; }
+    sudo ip addr add 10.0.0.1/24 dev veth$i || { echo "错误：为 veth$i 分配IP地址失败。" >&2; exit 1; }
     echo "   ✅ 虚拟以太网设备配置成功。"
 
     # 4. 启动虚拟以太网设备
-    echo "   - 步骤4/9: 启动虚拟以太网设备..."
+    echo "   - 步骤4/8: 启动虚拟以太网设备..."
     sudo ip link set veth$i up || { echo "错误：启动 veth$i 失败。" >&2; exit 1; }
     sudo ip netns exec ns$i ip link set veth${i}-ns up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
     echo "   ✅ 虚拟以太网设备已启动。"
 
     # 5. 设置命名空间内的默认路由
-    # 使命名空间 ns$i 内的流量通过 veth$i (10.0.0.1) 路由出去
-    echo "   - 步骤5/9: 设置 ns$i 内的默认路由指向 10.0.0.1..."
+    echo "   - 步骤5/8: 设置 ns$i 内的默认路由指向 10.0.0.1..."
     sudo ip netns exec ns$i ip route add default via 10.0.0.1 || { echo "错误：在 ns$i 中设置默认路由失败。" >&2; exit 1; }
     echo "   ✅ ns$i 默认路由设置成功。"
 
     # 6. 配置NAT (网络地址转换)
-    # 允许来自 10.0.0.0/24 网段 (即所有命名空间) 的流量通过主机的出口进行MASQUERADE (源地址伪装)
-    # 注意: 这条规则是全局的，只需要设置一次。但为了脚本的幂等性和清晰性，放在循环内问题不大，iptables会自动处理重复规则。
-    # 更优的做法是检查规则是否存在，不存在则添加。
-    echo "   - 步骤6/9: 配置NAT规则 (MASQUERADE)..."
+    echo "   - 步骤6/8: 配置NAT规则 (MASQUERADE)..."
     if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/null; then
         sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE || { echo "错误：配置NAT (MASQUERADE) 规则失败。" >&2; exit 1; }
         echo "   ✅ NAT (MASQUERADE) 规则已添加。"
@@ -129,20 +131,34 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
         echo "   ℹ️  NAT (MASQUERADE) 规则已存在。"
     fi
 
-    # 7. 在命名空间中初始化并连接WARP
-    echo "   - 步骤7/9: 在 ns$i 中初始化并连接WARP..."
+    # 7. 在命名空间中初始化WARP并启用内置SOCKS5代理
+    SOCKS_PORT_IN_NAMESPACE=40000 # WARP内置SOCKS5代理的端口
+    echo "   - 步骤7/8: 在 ns$i 中初始化WARP并启用内置SOCKS5代理..."
     echo "     - 启动WARP服务守护进程..."
-    # 在后台启动warp-svc，它是warp-cli的守护进程
     sudo ip netns exec ns$i warp-svc &
-    # 等待几秒钟，确保warp-svc完全启动
-    sleep 3
+    sleep 3 # 等待warp-svc启动
+
+    echo "     - 设置WARP为SOCKS5代理模式 (端口: $SOCKS_PORT_IN_NAMESPACE)..."
+    sudo ip netns exec ns$i warp-cli mode proxy || { echo "错误：在 ns$i 中设置WARP代理模式失败。" >&2; exit 1; }
+    sudo ip netns exec ns$i warp-cli proxy set-port $SOCKS_PORT_IN_NAMESPACE || { echo "错误：在 ns$i 中设置SOCKS5端口失败。" >&2; exit 1; }
+    
     echo "     - 注册WARP..."
-    # 设置代理模式为SOCKS，这样dante才能接管
-    sudo ip netns exec ns$i warp-cli set-mode proxy || { echo "错误：在 ns$i 中设置WARP代理模式失败。" >&2; exit 1; }
-    sudo ip netns exec ns$i warp-cli --accept-tos registration new || echo "警告：WARP注册可能已完成或失败，请检查 warp-cli 日志。"
+    sudo ip netns exec ns$i warp-cli --accept-tos registration new || echo "警告：WARP注册可能已完成或失败。"
+    
+    if [ -n "$WARP_LICENSE_KEY" ]; then
+        echo "     - 尝试使用许可证密钥升级到WARP+..."
+        sudo ip netns exec ns$i warp-cli registration license "$WARP_LICENSE_KEY" || echo "警告：许可证密钥设置失败。"
+    fi
+
+    if [ -n "$WARP_ENDPOINT" ]; then
+        echo "     - 设置自定义WARP端点: $WARP_ENDPOINT..."
+        sudo ip netns exec ns$i warp-cli tunnel endpoint reset || echo "警告：重置端点失败。"
+        sudo ip netns exec ns$i warp-cli tunnel endpoint set "$WARP_ENDPOINT" || echo "警告：设置自定义端点失败。"
+    fi
+
     echo "     - 连接WARP..."
     sudo ip netns exec ns$i warp-cli connect || { echo "错误：在 ns$i 中连接WARP失败。" >&2; exit 1; }
-    # 检查连接状态
+    
     if ! sudo ip netns exec ns$i warp-cli status | grep -q "Status: Connected"; then
         echo "错误：在 ns$i 中连接WARP后状态检查失败。" >&2
         sudo ip netns exec ns$i warp-cli status >&2
@@ -150,50 +166,18 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     fi
     echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
 
-    # 8. 在命名空间中启动SOCKS5代理 (dante-server)
-    SOCKS_PORT=1080 # SOCKS5服务在命名空间内部监听的端口
-    DANTED_CONF_FILE="/tmp/danted_ns${i}.conf"
-    NAMESPACE_IP="10.0.0.$((i+2))" # 对应步骤3中分配的IP
-
-    echo "   - 步骤8/9: 在 ns$i 中启动SOCKS5代理 (dante-server)..."
-    # 动态生成dante配置文件
-    cat > "$DANTED_CONF_FILE" <<EOF
-logoutput: stderr
-internal: $NAMESPACE_IP port = $SOCKS_PORT
-external: veth${i}-ns
-method: none
-user.privileged: root
-user.unprivileged: nobody
-
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect error
-}
-
-pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    protocol: tcp udp
-    log: connect error
-}
-EOF
-    # 在命名空间内启动dante-server
-    sudo ip netns exec ns$i danted -f "$DANTED_CONF_FILE" -D || { echo "错误：在 ns$i 中启动dante-server失败。" >&2; exit 1; }
-    echo "   ✅ SOCKS5代理 (dante-server) 已在 ns$i 中启动，监听在 $NAMESPACE_IP:$SOCKS_PORT。"
-
-    # 9. 创建端口映射 (DNAT)
+    # 8. 创建端口映射 (DNAT)
     HOST_PORT=$((BASE_PORT + $i))
-    echo "   - 步骤9/9: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCKS_PORT (ns$i)..."
-    # PREROUTING链用于DNAT
-    if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT &> /dev/null; then
-        sudo iptables -t nat -A PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT || { echo "错误：创建DNAT规则失败 (PREROUTING)。" >&2; exit 1; }
+    echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE (ns$i)..."
+    if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; then
+        sudo iptables -t nat -A PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE || { echo "错误：创建DNAT规则失败 (PREROUTING)。" >&2; exit 1; }
     fi
-    # FORWARD链用于允许数据包通过
-    if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT &> /dev/null; then
-        sudo iptables -A FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
+    if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT &> /dev/null; then
+        sudo iptables -A FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
     fi
-    echo "   ✅ 端口映射创建成功: 主机 $HOST_PORT <--> ns$i ($NAMESPACE_IP:$SOCKS_PORT)"
+    echo "   ✅ 端口映射创建成功: 主机 $HOST_PORT <--> ns$i ($NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE)"
 
-    echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT (内部dante端口: $SOCKS_PORT)"
+    echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT (内部WARP代理端口: $SOCKS_PORT_IN_NAMESPACE)"
 done
 
 echo "====================================================="
