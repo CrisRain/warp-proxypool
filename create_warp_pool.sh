@@ -202,9 +202,11 @@ create_pool() {
                 if ! command -v nslookup &> /dev/null; then
                     echo "     - nslookup 未安装，尝试安装 busybox..."
                     if command -v apt-get &> /dev/null; then
-                        apt-get update >/dev/null 2>&1 && apt-get install -y busybox >/dev/null 2>&1 || echo "警告: busybox apt 安装失败。"
+                        echo "       - 正在运行 apt-get update... (这可能需要一些时间)"
+                        apt-get update && apt-get install -y busybox || echo "警告: busybox apt 安装失败。"
                     elif command -v yum &> /dev/null; then
-                        yum install -y busybox >/dev/null 2>&1 || echo "警告: busybox yum 安装失败。"
+                        echo "       - 正在运行 yum install... (这可能需要一些时间)"
+                        yum install -y busybox || echo "警告: busybox yum 安装失败。"
                     fi
                 fi
                 
