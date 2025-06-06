@@ -137,6 +137,7 @@ create_pool() {
         fi
 
         # 7. 初始化WARP
+        # warp-cli 2025+ 版本SOCKS5代理端口固定为40000，无法自定义
         SOCKS_PORT_IN_NAMESPACE=40000
         echo "   - 步骤7/8: 在 ns$i 中初始化WARP..."
         echo "     - (预清理) 尝试断开连接并删除旧注册..."
@@ -191,7 +192,8 @@ create_pool() {
         
         echo "     - 设置WARP为SOCKS5代理模式..."
         sudo ip netns exec ns$i warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
-        sudo ip netns exec ns$i warp-cli --accept-tos proxy set-port $SOCKS_PORT_IN_NAMESPACE || { echo "错误：设置SOCKS5端口失败。" >&2; exit 1; } # 修正: proxy port -> proxy set-port
+        # warp-cli 2025+ 版本不支持自定义SOCKS5端口，默认端口为40000
+        sudo ip netns exec ns$i warp-cli --accept-tos proxy port $SOCKS_PORT_IN_NAMESPACE
         
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "     - 尝试使用许可证密钥升级到WARP+..."
