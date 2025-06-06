@@ -156,9 +156,10 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     SVC_WAIT_COUNT=0
     SVC_READY=false
     while [ $SVC_WAIT_COUNT -lt $MAX_SVC_WAIT_ATTEMPTS ]; do
-        # 检查 `warp-cli status` 是否能成功执行，这表明服务已就绪
-        if sudo ip netns exec ns$i warp-cli status &> /dev/null; then
-            echo "       WARP服务已响应。"
+        # 检查IPC socket文件是否存在，这表明warp-svc已准备好接受命令
+        # 这是比 `warp-cli status` 更可靠的检查方法
+        if sudo ip netns exec ns$i test -S /run/cloudflare-warp/warp_service; then
+            echo "       WARP服务IPC Socket已就绪。"
             SVC_READY=true
             break
         fi
