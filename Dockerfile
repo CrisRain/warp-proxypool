@@ -1,5 +1,5 @@
 # 使用 Ubuntu 最新版作为基础镜像
-FROM ubuntu:latest
+FROM ubuntu:22.04
 
 # 设置环境变量，避免安装过程中的交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 
 # 安装 warp-cli
 RUN curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
     apt-get install -y warp-cli && \
     rm -rf /var/lib/apt/lists/*
