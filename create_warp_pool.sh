@@ -300,11 +300,18 @@ create_pool() {
                 CONNECTED=false
                 while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
                     RAW_STATUS_OUTPUT=$(warp-cli --accept-tos status 2>&1 || true)
-                    echo "       [RAW] (尝试 $(($CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) ns$1 status: $RAW_STATUS_OUTPUT"
-                    if echo "$RAW_STATUS_OUTPUT" | grep -q "Status: Connected"; then
+                    # 使用 case 语句进行更健壮的模式匹配
+                    case "$RAW_STATUS_OUTPUT" in
+                      *"Status: Connected"*)
+                        echo "   ✅ WARP在 ns$1 中已成功初始化并连接。"
                         CONNECTED=true
                         break
-                    fi
+                        ;;
+                      *)
+                        # 如果没有连接，则记录原始输出以供调试
+                        echo "       (尝试 $(($CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) ns$1 status: $RAW_STATUS_OUTPUT"
+                        ;;
+                    esac
                     sleep 5
                     CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
                 done
@@ -334,7 +341,6 @@ create_pool() {
 
         ) 200>/tmp/warp_pool_instance_$i.lock # 每个实例使用不同的锁文件，避免潜在冲突，并确保路径可靠
 
-        echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
 
         # 8. 创建端口映射
         HOST_PORT=$((BASE_PORT + $i))
