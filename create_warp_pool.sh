@@ -98,6 +98,12 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     sudo ip netns add ns$i || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
     echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
+    # 1.5. 为命名空间配置DNS解析
+    # 创建netns目录并写入resolv.conf，解决命名空间内DNS解析问题
+    sudo mkdir -p "/etc/netns/ns$i"
+    echo "nameserver 8.8.8.8" | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
+    echo "   ✅ 为 ns$i 配置了DNS (8.8.8.8)。"
+
     # 2. 创建虚拟以太网设备对 (veth pair)
     echo "   - 步骤2/8: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
     sudo ip link add veth$i type veth peer name veth${i}-ns || { echo "错误：创建虚拟以太网设备对 veth$i <--> veth${i}-ns 失败。" >&2; exit 1; }
@@ -135,15 +141,24 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     SOCKS_PORT_IN_NAMESPACE=40000 # WARP内置SOCKS5代理的端口
     echo "   - 步骤7/8: 在 ns$i 中初始化WARP并启用内置SOCKS5代理..."
     echo "     - 启动WARP服务守护进程..."
+    # 在后台启动warp-svc
     sudo ip netns exec ns$i warp-svc &
+    # 等待片刻，让进程启动
+    sleep 2
 
-    echo "     - 等待WARP服务守护进程 (warp-svc) 启动..."
+    echo "     - 注册WARP并接受服务条款 (TOS)..."
+    # 必须先接受TOS并注册，否则后续的warp-cli命令会失败
+    # 使用`|| true`来忽略已经注册时可能出现的错误
+    sudo ip netns exec ns$i warp-cli --accept-tos registration new || true
+    
+    echo "     - 等待WARP服务完全就绪..."
     MAX_SVC_WAIT_ATTEMPTS=15
     SVC_WAIT_COUNT=0
     SVC_READY=false
     while [ $SVC_WAIT_COUNT -lt $MAX_SVC_WAIT_ATTEMPTS ]; do
+        # 检查 `warp-cli status` 是否能成功执行，这表明服务已就绪
         if sudo ip netns exec ns$i warp-cli status &> /dev/null; then
-            echo "       WARP服务守护进程已响应。"
+            echo "       WARP服务已响应。"
             SVC_READY=true
             break
         fi
@@ -153,9 +168,8 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     done
 
     if [ "$SVC_READY" = false ]; then
-        echo "错误：等待WARP服务守护进程 (warp-svc) 超时 (尝试 $MAX_SVC_WAIT_ATTEMPTS 次后仍未就绪)。" >&2
-        echo "请检查 ns$i 网络命名空间内的 warp-svc 日志或状态。" >&2
-        # 尝试获取一些诊断信息
+        echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
+        echo "请检查 ns$i 网络命名空间内的日志。" >&2
         sudo ip netns exec ns$i ps aux | grep warp || true
         sudo ip netns exec ns$i warp-cli status || true
         exit 1
@@ -164,9 +178,6 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     echo "     - 设置WARP为SOCKS5代理模式 (端口: $SOCKS_PORT_IN_NAMESPACE)..."
     sudo ip netns exec ns$i warp-cli mode proxy || { echo "错误：在 ns$i 中设置WARP代理模式失败。" >&2; exit 1; }
     sudo ip netns exec ns$i warp-cli proxy set-port $SOCKS_PORT_IN_NAMESPACE || { echo "错误：在 ns$i 中设置SOCKS5端口失败。" >&2; exit 1; }
-    
-    echo "     - 注册WARP..."
-    sudo ip netns exec ns$i warp-cli --accept-tos registration new || echo "警告：WARP注册可能已完成或失败。"
     
     if [ -n "$WARP_LICENSE_KEY" ]; then
         echo "     - 尝试使用许可证密钥升级到WARP+..."
