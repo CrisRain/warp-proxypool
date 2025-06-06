@@ -144,6 +144,23 @@ create_pool() {
         sudo ip netns exec ns$i warp-cli --accept-tos disconnect || true
         sudo ip netns exec ns$i warp-cli --accept-tos registration delete || true
         sleep 1 # 短暂等待清理命令完成
+        
+        # 检查并安装 nslookup（优先 busybox，次选 dnsutils）
+        if ! sudo ip netns exec ns$i command -v nslookup &> /dev/null; then
+            echo "     - nslookup 未安装，尝试安装 busybox..."
+            if sudo ip netns exec ns$i command -v apt-get &> /dev/null; then
+                sudo ip netns exec ns$i apt-get update && sudo ip netns exec ns$i apt-get install -y busybox
+            elif sudo ip netns exec ns$i command -v yum &> /dev/null; then
+                sudo ip netns exec ns$i yum install -y busybox
+            fi
+        fi
+        
+        # 检查外网连通性
+        if sudo ip netns exec ns$i command -v nslookup &> /dev/null; then
+            sudo ip netns exec ns$i nslookup api.cloudflareclient.com || echo "警告：命名空间 ns$i 无法解析域名，WARP 连接可能失败。"
+        else
+            echo "警告：nslookup 依然未安装，无法检测 DNS。"
+        fi
 
         echo "     - 强制清理残留的 socket 文件 (如果存在)..."
         sudo ip netns exec ns$i rm -f /run/cloudflare-warp/warp_service || true
@@ -237,6 +254,12 @@ create_pool() {
             else
                 echo "nslookup 未安装，跳过 DNS 测试。" >&2
             fi
+            echo "------ 网络接口 ------" >&2
+            sudo ip netns exec ns$i ip addr >&2
+            echo "------ 路由表 ------" >&2
+            sudo ip netns exec ns$i ip route >&2
+            echo "------ NAT 规则 ------" >&2
+            sudo iptables -t nat -L -n -v >&2
             exit 1
         fi
         echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
