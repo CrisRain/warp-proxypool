@@ -183,8 +183,15 @@ create_pool() {
 
             echo "     - (预清理) 尝试断开连接并删除旧注册..."
             # 在独立的命名空间内执行清理和注册
-            sudo ip netns exec ns$i bash -c "
+            # 使用单引号和参数传递来避免变量扩展问题
+            sudo ip netns exec "ns$i" bash -c '
                 set -euo pipefail
+                
+                # 从参数中获取父 shell 的变量
+                # $1: i
+                # $2: CUSTOM_PROXY_PORT
+                # $3: WARP_LICENSE_KEY
+                # $4: WARP_ENDPOINT
                 
                 # 断开并删除旧注册
                 warp-cli --accept-tos disconnect || true
@@ -193,8 +200,7 @@ create_pool() {
 
                 # 检查并安装 nslookup
                 if ! command -v nslookup &> /dev/null; then
-                    echo '     - nslookup 未安装，尝试安装 busybox...'
-                    # 尝试静默安装，避免过多输出
+                    echo "     - nslookup 未安装，尝试安装 busybox..."
                     if command -v apt-get &> /dev/null; then
                         apt-get update >/dev/null 2>&1 && apt-get install -y busybox >/dev/null 2>&1 || echo "警告: busybox apt 安装失败。"
                     elif command -v yum &> /dev/null; then
@@ -204,88 +210,87 @@ create_pool() {
                 
                 # 检查外网连通性
                 if command -v nslookup &> /dev/null; then
-                    # 增加超时和重试，提高稳定性
                     if ! timeout 5s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
                         sleep 2
                         if ! timeout 5s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
-                            echo '错误：命名空间 ns'$i' 无法解析域名 api.cloudflareclient.com，请检查网络配置。' >&2
+                            echo "错误：命名空间 ns$1 无法解析域名 api.cloudflareclient.com，请检查网络配置。" >&2
                             exit 1
                         fi
                     fi
                     echo "   ✅ nslookup api.cloudflareclient.com 成功。"
                 else
-                    echo '警告：nslookup 依然未安装，无法检测 DNS。'
+                    echo "警告：nslookup 依然未安装，无法检测 DNS。"
                 fi
 
-                echo '     - 强制清理残留的 socket 文件 (如果存在)...'
+                echo "     - 强制清理残留的 socket 文件 (如果存在)..."
                 rm -f /run/cloudflare-warp/warp_service || true
 
-                echo '     - 启动WARP服务守护进程...'
+                echo "     - 启动WARP服务守护进程..."
                 warp-svc &
                 sleep 5 # 给 warp-svc 更多启动时间
 
-                echo '     - 等待WARP服务IPC Socket就绪...'
-                _MAX_SVC_WAIT_ATTEMPTS=15 # 使用下划线开头的局部变量
+                echo "     - 等待WARP服务IPC Socket就绪..."
+                _MAX_SVC_WAIT_ATTEMPTS=15
                 _SVC_WAIT_COUNT=0
                 _SVC_READY=false
                 while [ $_SVC_WAIT_COUNT -lt $_MAX_SVC_WAIT_ATTEMPTS ]; do
                     if test -S /run/cloudflare-warp/warp_service; then
-                        echo '       WARP服务IPC Socket已就绪。'
+                        echo "       WARP服务IPC Socket已就绪。"
                         _SVC_READY=true
                         break
                     fi
-                    _current_attempt_val=\$((\$_SVC_WAIT_COUNT + 1)); echo "       等待中... 尝试 \$_current_attempt_val / \$_MAX_SVC_WAIT_ATTEMPTS"
+                    _current_attempt_val=$(($_SVC_WAIT_COUNT + 1)); echo "       等待中... 尝试 $_current_attempt_val / $_MAX_SVC_WAIT_ATTEMPTS"
                     sleep 2
                     _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
                 done
 
                 if [ "$_SVC_READY" = false ]; then
-                    echo '错误：等待WARP服务 (warp-svc) 超时。' >&2
+                    echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
                     ps aux | grep warp || true
                     exit 1
                 fi
 
-                echo '     - 注册WARP并接受服务条款 (TOS)...'
+                echo "     - 注册WARP并接受服务条款 (TOS)..."
                 if ! warp-cli --accept-tos registration new; then
-                     # 增加对 "Status: Registered" 的精确匹配
                      if warp-cli --accept-tos status | grep -q "Status: Registered"; then
-                         echo '   ℹ️  WARP 已注册，继续...'
+                         echo "   ℹ️  WARP 已注册，继续..."
                      elif warp-cli --accept-tos status | grep -q "Status: Connected"; then
-                         echo '   ℹ️  WARP 已连接，继续...'
+                         echo "   ℹ️  WARP 已连接，继续..."
                      elif warp-cli --accept-tos status | grep -qi "Account type:"; then
-                         echo '   ℹ️  WARP 已有账户信息，继续...'
+                         echo "   ℹ️  WARP 已有账户信息，继续..."
                      else
-                         echo '错误：注册WARP失败。请检查 warp-svc 是否正常运行，以及网络连接。' >&2
+                         echo "错误：注册WARP失败。请检查 warp-svc 是否正常运行，以及网络连接。" >&2
                          warp-cli --accept-tos status >&2
                          ps aux | grep warp || true
                          exit 1
                      fi
                 else
-                    echo '   ✅ WARP新注册成功。'
+                    echo "   ✅ WARP新注册成功。"
                 fi
                 
-                echo '     - 设置WARP为SOCKS5代理模式...'
+                echo "     - 设置WARP为SOCKS5代理模式..."
                 warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
                 
-                if [ -n "$CUSTOM_PROXY_PORT" ]; then # 注意这里变量的引用方式
-                    echo "     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT..."
-                    warp-cli --accept-tos proxy port "$CUSTOM_PROXY_PORT" || echo '警告：设置自定义代理端口失败，可能warp-cli版本不支持。'
+                # 使用从父shell传递的参数
+                if [ -n "$2" ]; then
+                    echo "     - 设置自定义SOCKS5代理端口: $2..."
+                    warp-cli --accept-tos proxy port "$2" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
                 fi
                 
-                if [ -n "$WARP_LICENSE_KEY" ]; then # 注意这里变量的引用方式
-                    echo '     - 尝试使用许可证密钥升级到WARP+...'
-                    warp-cli --accept-tos registration license "$WARP_LICENSE_KEY" || echo '警告：许可证密钥设置失败。'
+                if [ -n "$3" ]; then
+                    echo "     - 尝试使用许可证密钥升级到WARP+..."
+                    warp-cli --accept-tos registration license "$3" || echo "警告：许可证密钥设置失败。"
                 fi
 
-                if [ -n "$WARP_ENDPOINT" ]; then # 注意这里变量的引用方式
-                    echo "     - 设置自定义WARP端点: $WARP_ENDPOINT..."
-                    warp-cli --accept-tos tunnel endpoint reset || echo '警告：重置端点失败。'
-                    warp-cli --accept-tos tunnel endpoint set "$WARP_ENDPOINT" || echo '警告：设置自定义端点失败。'
+                if [ -n "$4" ]; then
+                    echo "     - 设置自定义WARP端点: $4..."
+                    warp-cli --accept-tos tunnel endpoint reset || echo "警告：重置端点失败。"
+                    warp-cli --accept-tos tunnel endpoint set "$4" || echo "警告：设置自定义端点失败。"
                 fi
 
-                echo '     - 连接WARP...'
+                echo "     - 连接WARP..."
                 warp-cli --accept-tos connect || { echo "错误：连接WARP失败。" >&2; exit 1; }
-            " || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
+            ' bash "$i" "$CUSTOM_PROXY_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
             # 释放锁
             flock -u 200
