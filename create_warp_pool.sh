@@ -141,8 +141,12 @@ create_pool() {
             echo "   - 步骤1.5/8: 为 ns$i 配置DNS..."
             sudo mkdir -p "/etc/netns/ns$i"
             # 根据您的要求，强制使用 1.1.1.1 作为 DNS
-            echo "nameserver 1.1.1.1" | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
-            echo "   ✅ 已强制配置DNS为 1.1.1.1。"
+            # 使用 Cloudflare 和 Google 的 DNS，增加冗余
+            cat <<EOF | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+            echo "   ✅ 已配置DNS为 1.1.1.1 和 8.8.8.8。"
 
             # 2. 创建虚拟以太网设备对
             echo "   - 步骤2/8: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
