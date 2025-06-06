@@ -166,6 +166,11 @@ EOF
             sudo ip netns exec "ns$i" ip link set "veth${i}-ns" up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
             echo "   ✅ 虚拟以太网设备已启动。"
 
+            # 4.5. 禁用反向路径过滤 (解决某些环境下NAT转发问题)
+            echo "   - 步骤4.5/8: 禁用 veth$i 上的反向路径过滤..."
+            sudo sysctl -w "net.ipv4.conf.veth$i.rp_filter=0" >/dev/null || { echo "警告：禁用反向路径过滤失败，可能会影响连接。" >&2; }
+            echo "   ✅ veth$i 反向路径过滤已禁用。"
+
             # 5. 设置命名空间内的默认路由
             echo "   - 步骤5/8: 设置 ns$i 内的默认路由..."
             sudo ip netns exec "ns$i" ip route add default via "$GATEWAY_IP" || { echo "错误：在 ns$i 中设置默认路由失败。" >&2; exit 1; }
@@ -204,14 +209,15 @@ EOF
 
                 # 检查外网连通性
                 echo "     - 检查外网连通性..."
-                if ! timeout 10s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
+                # 使用 ping 代替 nslookup 进行连通性测试，-c 1 表示只发送一个包
+                if ! timeout 10s ping -c 1 api.cloudflareclient.com >/dev/null 2>&1; then
                     sleep 2
-                    if ! timeout 10s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
-                        echo "错误：命名空间 ns$i 无法解析域名 api.cloudflareclient.com，请检查网络配置。" >&2
+                    if ! timeout 10s ping -c 1 api.cloudflareclient.com >/dev/null 2>&1; then
+                        echo "错误：命名空间 ns$i 无法 ping 通 api.cloudflareclient.com，请检查网络配置。" >&2
                         exit 1
                     fi
                 fi
-                echo "   ✅ nslookup api.cloudflareclient.com 成功。"
+                echo "   ✅ ping api.cloudflareclient.com 成功。"
 
                 echo "     - 强制清理残留的 socket 文件 (如果存在)..."
                 rm -f /run/cloudflare-warp/warp_service || true
