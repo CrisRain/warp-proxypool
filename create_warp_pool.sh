@@ -169,7 +169,7 @@ create_pool() {
 
         echo "     - 设置WARP为SOCKS5代理模式..."
         sudo ip netns exec ns$i warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
-        sudo ip netns exec ns$i warp-cli --accept-tos proxy set-port $SOCKS_PORT_IN_NAMESPACE || { echo "错误：设置SOCKS5端口失败。" >&2; exit 1; }
+        sudo ip netns exec ns$i warp-cli --accept-tos proxy port $SOCKS_PORT_IN_NAMESPACE || { echo "错误：设置SOCKS5端口失败。" >&2; exit 1; }
         
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "     - 尝试使用许可证密钥升级到WARP+..."
