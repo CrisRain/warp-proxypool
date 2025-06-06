@@ -194,19 +194,25 @@ create_pool() {
                 # 检查并安装 nslookup
                 if ! command -v nslookup &> /dev/null; then
                     echo '     - nslookup 未安装，尝试安装 busybox...'
+                    # 尝试静默安装，避免过多输出
                     if command -v apt-get &> /dev/null; then
-                        apt-get update >/dev/null && apt-get install -y busybox >/dev/null
+                        apt-get update >/dev/null 2>&1 && apt-get install -y busybox >/dev/null 2>&1 || echo "警告: busybox (apt) 安装失败。"
                     elif command -v yum &> /dev/null; then
-                        yum install -y busybox >/dev/null
+                        yum install -y busybox >/dev/null 2>&1 || echo "警告: busybox (yum) 安装失败。"
                     fi
                 fi
                 
                 # 检查外网连通性
                 if command -v nslookup &> /dev/null; then
-                    if ! nslookup api.cloudflareclient.com; then
-                        echo '错误：命名空间 ns$i 无法解析域名，请检查网络配置。' >&2
-                        exit 1
+                    # 增加超时和重试，提高稳定性
+                    if ! timeout 5s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
+                        sleep 2
+                        if ! timeout 5s nslookup api.cloudflareclient.com >/dev/null 2>&1; then
+                            echo '错误：命名空间 ns'$i' 无法解析域名 api.cloudflareclient.com，请检查网络配置。' >&2
+                            exit 1
+                        fi
                     fi
+                    echo "   ✅ nslookup api.cloudflareclient.com 成功。"
                 else
                     echo '警告：nslookup 依然未安装，无法检测 DNS。'
                 fi
@@ -219,19 +225,21 @@ create_pool() {
                 sleep 5 # 给 warp-svc 更多启动时间
 
                 echo '     - 等待WARP服务IPC Socket就绪...'
-                MAX_SVC_WAIT_ATTEMPTS=15
-                SVC_WAIT_COUNT=0
-                while [ \$SVC_WAIT_COUNT -lt \$MAX_SVC_WAIT_ATTEMPTS ]; do
+                _MAX_SVC_WAIT_ATTEMPTS=15 # 使用下划线开头的局部变量
+                _SVC_WAIT_COUNT=0
+                _SVC_READY=false
+                while [ $_SVC_WAIT_COUNT -lt $_MAX_SVC_WAIT_ATTEMPTS ]; do
                     if test -S /run/cloudflare-warp/warp_service; then
                         echo '       WARP服务IPC Socket已就绪。'
+                        _SVC_READY=true
                         break
                     fi
-                    echo '       等待中... (尝试 '`expr \$SVC_WAIT_COUNT + 1`'/'\$MAX_SVC_WAIT_ATTEMPTS')'
+                    echo "       等待中... (尝试 $(($_SVC_WAIT_COUNT + 1))/$_MAX_SVC_WAIT_ATTEMPTS)"
                     sleep 2
-                    SVC_WAIT_COUNT=`expr \$SVC_WAIT_COUNT + 1`
+                    _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
                 done
 
-                if ! test -S /run/cloudflare-warp/warp_service; then
+                if [ "$_SVC_READY" = false ]; then
                     echo '错误：等待WARP服务 (warp-svc) 超时。' >&2
                     ps aux | grep warp || true
                     exit 1
@@ -239,8 +247,13 @@ create_pool() {
 
                 echo '     - 注册WARP并接受服务条款 (TOS)...'
                 if ! warp-cli --accept-tos registration new; then
-                     if warp-cli --accept-tos status | grep -qiE '(Account type:|Status: Registered|Status: Connected)'; then
-                         echo '   ℹ️  WARP 已注册或连接，继续...'
+                     # 增加对 "Status: Registered" 的精确匹配
+                     if warp-cli --accept-tos status | grep -q "Status: Registered"; then
+                         echo '   ℹ️  WARP 已注册，继续...'
+                     elif warp-cli --accept-tos status | grep -q "Status: Connected"; then
+                         echo '   ℹ️  WARP 已连接，继续...'
+                     elif warp-cli --accept-tos status | grep -qi "Account type:"; then
+                         echo '   ℹ️  WARP 已有账户信息，继续...'
                      else
                          echo '错误：注册WARP失败。请检查 warp-svc 是否正常运行，以及网络连接。' >&2
                          warp-cli --accept-tos status >&2
@@ -252,46 +265,47 @@ create_pool() {
                 fi
                 
                 echo '     - 设置WARP为SOCKS5代理模式...'
-                warp-cli --accept-tos mode proxy
+                warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
                 
-                if [ -n \"$CUSTOM_PROXY_PORT\" ]; then
-                    echo \"     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT...\"
-                    warp-cli --accept-tos proxy port \"$CUSTOM_PROXY_PORT\" || echo '警告：设置自定义代理端口失败，可能warp-cli版本不支持。'
+                if [ -n "$CUSTOM_PROXY_PORT" ]; then # 注意这里变量的引用方式
+                    echo "     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT..."
+                    warp-cli --accept-tos proxy port "$CUSTOM_PROXY_PORT" || echo '警告：设置自定义代理端口失败，可能warp-cli版本不支持。'
                 fi
                 
-                if [ -n \"$WARP_LICENSE_KEY\" ]; then
+                if [ -n "$WARP_LICENSE_KEY" ]; then # 注意这里变量的引用方式
                     echo '     - 尝试使用许可证密钥升级到WARP+...'
-                    warp-cli --accept-tos registration license \"$WARP_LICENSE_KEY\" || echo '警告：许可证密钥设置失败。'
+                    warp-cli --accept-tos registration license "$WARP_LICENSE_KEY" || echo '警告：许可证密钥设置失败。'
                 fi
 
-                if [ -n \"$WARP_ENDPOINT\" ]; then
-                    echo \"     - 设置自定义WARP端点: $WARP_ENDPOINT...\"
+                if [ -n "$WARP_ENDPOINT" ]; then # 注意这里变量的引用方式
+                    echo "     - 设置自定义WARP端点: $WARP_ENDPOINT..."
                     warp-cli --accept-tos tunnel endpoint reset || echo '警告：重置端点失败。'
-                    warp-cli --accept-tos tunnel endpoint set \"$WARP_ENDPOINT\" || echo '警告：设置自定义端点失败。'
+                    warp-cli --accept-tos tunnel endpoint set "$WARP_ENDPOINT" || echo '警告：设置自定义端点失败。'
                 fi
 
                 echo '     - 连接WARP...'
-                warp-cli --accept-tos connect
+                warp-cli --accept-tos connect || { echo "错误：连接WARP失败。" >&2; exit 1; }
             " || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
             # 释放锁
             flock -u 200
 
-        ) 200>/var/lock/warp_pool.lock # 定义锁文件
+        ) 200>/tmp/warp_pool_instance_$i.lock # 每个实例使用不同的锁文件，避免潜在冲突，并确保路径可靠
 
         echo "     - 等待WARP连接成功..."
-        MAX_CONNECT_WAIT_ATTEMPTS=15 # 增加等待次数
+        MAX_CONNECT_WAIT_ATTEMPTS=20 # 增加等待次数和超时
         CONNECT_WAIT_COUNT=0
         CONNECTED=false
         while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
-            # 使用更严格的检查，只寻找 "Connected" 状态
-            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -q "Status: Connected"; then
+            # 精确匹配 "Status: Connected"
+            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -Fxq "Status: Connected"; then
                 CONNECTED=true
                 break
             fi
-            CURRENT_STATUS=$(sudo ip netns exec ns$i warp-cli --accept-tos status | grep "Status:" || echo "Status: Error fetching status")
-            echo "       等待连接中... (尝试 $((CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) 当前状态: $CURRENT_STATUS"
-            sleep 4 # 增加等待时间
+            # 获取更干净的状态信息用于日志输出
+            CURRENT_STATUS_LINE=$(sudo ip netns exec ns$i warp-cli --accept-tos status | grep "Status:" | head -n 1 || echo "Status: Error fetching status")
+            echo "       等待连接中... (尝试 $((CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) 当前状态: $CURRENT_STATUS_LINE"
+            sleep 5 # 增加等待时间
             CONNECT_WAIT_COUNT=$((CONNECT_WAIT_COUNT+1))
         done
 
