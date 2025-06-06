@@ -234,7 +234,7 @@ create_pool() {
                         _SVC_READY=true
                         break
                     fi
-                    echo "       等待中... (尝试 $(($_SVC_WAIT_COUNT + 1))/$_MAX_SVC_WAIT_ATTEMPTS)"
+                    echo "       等待中... 尝试 $(($_SVC_WAIT_COUNT + 1)) / $_MAX_SVC_WAIT_ATTEMPTS"
                     sleep 2
                     _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
                 done
