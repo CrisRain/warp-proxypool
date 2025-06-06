@@ -139,14 +139,18 @@ create_pool() {
         # 7. 初始化WARP
         SOCKS_PORT_IN_NAMESPACE=40000
         echo "   - 步骤7/8: 在 ns$i 中初始化WARP..."
-        echo "     - 启动WARP服务守护进程..."
-        sudo ip netns exec ns$i warp-svc &
-        sleep 2
+        echo "     - (预清理) 尝试断开连接并删除旧注册..."
+        sudo ip netns exec ns$i warp-cli --accept-tos disconnect || true
+        sudo ip netns exec ns$i warp-cli --accept-tos registration delete || true
+        sleep 1 # 短暂等待清理命令完成
 
-        echo "     - 注册WARP并接受服务条款 (TOS)..."
-        sudo ip netns exec ns$i warp-cli --accept-tos registration new || true
-        
-        echo "     - 等待WARP服务完全就绪..."
+        echo "     - 启动WARP服务守护进程..."
+        # 清理可能的残留socket (谨慎操作，仅在确定需要时使用)
+        # sudo ip netns exec ns$i rm -f /run/cloudflare-warp/warp_service
+        sudo ip netns exec ns$i warp-svc &
+        sleep 2 # 等待 warp-svc 启动
+
+        echo "     - 等待WARP服务IPC Socket就绪..."
         MAX_SVC_WAIT_ATTEMPTS=15
         SVC_WAIT_COUNT=0
         SVC_READY=false
