@@ -17,6 +17,10 @@ WARP_LICENSE_KEY=""
 # 可以从这里找到优选IP: https://stock.hostmonit.com/CloudFlareYes
 WARP_ENDPOINT=""
 
+# 自定义WARP代理端口 (可选, 例如: 3306)
+# 如果设置此项，所有WARP实例将使用此端口作为SOCKS5代理端口
+CUSTOM_PROXY_PORT=""
+
 # --- 前置检查 ---
 # 检查 warp-cli 命令是否存在
 if ! command -v warp-cli &> /dev/null; then
@@ -98,6 +102,11 @@ create_pool() {
         sudo ip netns add ns$i || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
         echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
+        # 1.2. 启动命名空间内的loopback接口
+        echo "   - 步骤1.2/8: 启动 ns$i 内的 loopback 接口..."
+        sudo ip netns exec ns$i ip link set lo up || { echo "错误：启动 ns$i 内的 loopback 接口失败。" >&2; exit 1; }
+        echo "   ✅ ns$i loopback 接口已启动。"
+
         # 1.5. 为命名空间配置DNS解析
         sudo mkdir -p "/etc/netns/ns$i"
         echo "nameserver 8.8.8.8" | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
@@ -137,9 +146,13 @@ create_pool() {
         fi
 
         # 7. 初始化WARP
-        # warp-cli 2025+ 版本SOCKS5代理端口固定为40000，无法自定义
-        SOCKS_PORT_IN_NAMESPACE=40000
-        echo "   - 步骤7/8: 在 ns$i 中初始化WARP..."
+        # 如果用户自定义了端口，则使用该端口，否则使用默认的40000
+        if [ -n "$CUSTOM_PROXY_PORT" ]; then
+            SOCKS_PORT_IN_NAMESPACE=$CUSTOM_PROXY_PORT
+        else
+            SOCKS_PORT_IN_NAMESPACE=40000
+        fi
+        echo "   - 步骤7/8: 在 ns$i 中初始化WARP (内部SOCKS5端口: $SOCKS_PORT_IN_NAMESPACE)..."
         echo "     - (预清理) 尝试断开连接并删除旧注册..."
         sudo ip netns exec ns$i warp-cli --accept-tos disconnect || true
         sudo ip netns exec ns$i warp-cli --accept-tos registration delete || true
@@ -209,8 +222,12 @@ create_pool() {
         
         echo "     - 设置WARP为SOCKS5代理模式..."
         sudo ip netns exec ns$i warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
-        # warp-cli 2025+ 版本不支持自定义SOCKS5端口，默认端口为40000
-        # 旧命令已移除：sudo ip netns exec ns$i warp-cli --accept-tos proxy set-port $SOCKS_PORT_IN_NAMESPACE
+        
+        # 如果定义了自定义端口，则尝试设置它
+        if [ -n "$CUSTOM_PROXY_PORT" ]; then
+            echo "     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT..."
+            sudo ip netns exec ns$i warp-cli --accept-tos proxy port "$CUSTOM_PROXY_PORT" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
+        fi
         
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "     - 尝试使用许可证密钥升级到WARP+..."
