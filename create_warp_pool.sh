@@ -214,7 +214,7 @@ create_pool() {
 
 # --- 主逻辑 ---
 main() {
-    if [ "$1" == "cleanup" ]; then
+    if [ "${1:-}" == "cleanup" ]; then
         cleanup
     else
         # 默认行为：先清理，再创建
