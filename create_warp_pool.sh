@@ -136,7 +136,30 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     echo "   - 步骤7/8: 在 ns$i 中初始化WARP并启用内置SOCKS5代理..."
     echo "     - 启动WARP服务守护进程..."
     sudo ip netns exec ns$i warp-svc &
-    sleep 3 # 等待warp-svc启动
+
+    echo "     - 等待WARP服务守护进程 (warp-svc) 启动..."
+    MAX_SVC_WAIT_ATTEMPTS=15
+    SVC_WAIT_COUNT=0
+    SVC_READY=false
+    while [ $SVC_WAIT_COUNT -lt $MAX_SVC_WAIT_ATTEMPTS ]; do
+        if sudo ip netns exec ns$i warp-cli status &> /dev/null; then
+            echo "       WARP服务守护进程已响应。"
+            SVC_READY=true
+            break
+        fi
+        echo "       等待中... (尝试 $((SVC_WAIT_COUNT+1))/$MAX_SVC_WAIT_ATTEMPTS)"
+        sleep 2
+        SVC_WAIT_COUNT=$((SVC_WAIT_COUNT+1))
+    done
+
+    if [ "$SVC_READY" = false ]; then
+        echo "错误：等待WARP服务守护进程 (warp-svc) 超时 (尝试 $MAX_SVC_WAIT_ATTEMPTS 次后仍未就绪)。" >&2
+        echo "请检查 ns$i 网络命名空间内的 warp-svc 日志或状态。" >&2
+        # 尝试获取一些诊断信息
+        sudo ip netns exec ns$i ps aux | grep warp || true
+        sudo ip netns exec ns$i warp-cli status || true
+        exit 1
+    fi
 
     echo "     - 设置WARP为SOCKS5代理模式 (端口: $SOCKS_PORT_IN_NAMESPACE)..."
     sudo ip netns exec ns$i warp-cli mode proxy || { echo "错误：在 ns$i 中设置WARP代理模式失败。" >&2; exit 1; }
