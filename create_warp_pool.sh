@@ -193,7 +193,7 @@ create_pool() {
         echo "     - 设置WARP为SOCKS5代理模式..."
         sudo ip netns exec ns$i warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
         # warp-cli 2025+ 版本不支持自定义SOCKS5端口，默认端口为40000
-        sudo ip netns exec ns$i warp-cli --accept-tos proxy port $SOCKS_PORT_IN_NAMESPACE
+        # 旧命令已移除：sudo ip netns exec ns$i warp-cli --accept-tos proxy set-port $SOCKS_PORT_IN_NAMESPACE
         
         if [ -n "$WARP_LICENSE_KEY" ]; then
             echo "     - 尝试使用许可证密钥升级到WARP+..."
