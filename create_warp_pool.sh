@@ -48,6 +48,13 @@ cleanup() {
     while sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/null; do
         sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -j MASQUERADE
     done
+    # 清理通用 FORWARD 规则
+    while sudo iptables -C FORWARD -s 10.0.0.0/24 -j ACCEPT &> /dev/null; do
+        sudo iptables -D FORWARD -s 10.0.0.0/24 -j ACCEPT
+    done
+    while sudo iptables -C FORWARD -d 10.0.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &> /dev/null; do
+        sudo iptables -D FORWARD -d 10.0.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    done
     # 清理每个实例的 DNAT 和 FORWARD 规则
     SOCKS_PORT_IN_NAMESPACE=40000
     for i in $(seq 0 $(($POOL_SIZE-1))); do
@@ -137,12 +144,27 @@ create_pool() {
         echo "   ✅ ns$i 默认路由设置成功。"
 
         # 6. 配置NAT
-        echo "   - 步骤6/8: 配置NAT规则 (MASQUERADE)..."
+        echo "   - 步骤6/8: 配置NAT和转发规则..."
+        # 配置NAT (MASQUERADE)，允许命名空间流量通过主机出口
         if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/null; then
             sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
             echo "   ✅ NAT (MASQUERADE) 规则已添加。"
         else
             echo "   ℹ️  NAT (MASQUERADE) 规则已存在。"
+        fi
+        # 配置FORWARD规则，允许来自命名空间的流量转发出去
+        if ! sudo iptables -C FORWARD -s 10.0.0.0/24 -j ACCEPT &> /dev/null; then
+            sudo iptables -A FORWARD -s 10.0.0.0/24 -j ACCEPT || { echo "错误：配置出向FORWARD规则失败。" >&2; exit 1; }
+            echo "   ✅ 出向 FORWARD 规则已添加。"
+        else
+            echo "   ℹ️  出向 FORWARD 规则已存在。"
+        fi
+        # 允许已建立的连接的返回流量
+        if ! sudo iptables -C FORWARD -d 10.0.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &> /dev/null; then
+            sudo iptables -A FORWARD -d 10.0.0.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || { echo "错误：配置入向FORWARD规则失败。" >&2; exit 1; }
+            echo "   ✅ 入向 FORWARD (RELATED,ESTABLISHED) 规则已添加。"
+        else
+            echo "   ℹ️  入向 FORWARD (RELATED,ESTABLISHED) 规则已存在。"
         fi
 
         # 7. 初始化WARP
