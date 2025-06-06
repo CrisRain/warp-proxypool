@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     curl \
     gnupg \
+    ca-certificates \
     python3 \
     python3-pip \
     sudo \
