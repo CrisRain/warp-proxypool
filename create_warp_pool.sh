@@ -303,12 +303,15 @@ create_pool() {
         CONNECTED=false
         while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
             # 精确匹配 "Status: Connected"
-            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -Fxq "Status: Connected"; then
+            # 放宽检查以匹配输出中的 "Status: Connected"，因为格式可能是 "Status update: Connected"。
+            # 同时重定向stderr以捕获所有输出。
+            if sudo ip netns exec ns$i warp-cli --accept-tos status 2>&1 | grep -q "Status: Connected"; then
                 CONNECTED=true
                 break
             fi
             # 获取更干净的状态信息用于日志输出
-            CURRENT_STATUS_LINE=$(sudo ip netns exec ns$i warp-cli --accept-tos status | grep "Status:" | head -n 1 || echo "Status: Error fetching status")
+            # 同样为日志记录重定向stderr，以捕获所有可能的输出
+            CURRENT_STATUS_LINE=$(sudo ip netns exec ns$i warp-cli --accept-tos status 2>&1 | grep "Status:" | head -n 1 || echo "Status: Error fetching status")
             echo "       等待连接中... (尝试 $((CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) 当前状态: $CURRENT_STATUS_LINE"
             sleep 5 # 增加等待时间
             CONNECT_WAIT_COUNT=$((CONNECT_WAIT_COUNT+1))
