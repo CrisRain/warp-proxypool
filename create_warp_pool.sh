@@ -279,8 +279,8 @@ EOF
                 echo "     - 等待WARP连接成功..."
                 MAX_CONNECT_WAIT_ATTEMPTS=30
                 CONNECT_WAIT_COUNT=0
-                # 使用更健壮的grep来检查连接状态，忽略多余的空格
-                while ! warp-cli --accept-tos status | grep -q "Status:[[:space:]]*Connected"; do
+                # 使用更健壮的grep来检查连接状态，兼容 "Status: Connected" 和 "Status update: Connected"
+                while ! warp-cli --accept-tos status | grep -E -q "Status( update)?:[[:space:]]*Connected"; do
                     CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
                     if [ $CONNECT_WAIT_COUNT -gt $MAX_CONNECT_WAIT_ATTEMPTS ]; then
                         echo "错误：连接WARP后状态检查失败 (超时)。" >&2
