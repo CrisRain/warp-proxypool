@@ -290,56 +290,50 @@ create_pool() {
 
                 echo "     - 连接WARP..."
                 warp-cli --accept-tos connect || { echo "错误：连接WARP失败。" >&2; exit 1; }
+
+                echo "     - 等待5秒让WARP服务稳定..."
+                sleep 5
+
+                echo "     - 等待WARP连接成功..."
+                MAX_CONNECT_WAIT_ATTEMPTS=20
+                CONNECT_WAIT_COUNT=0
+                CONNECTED=false
+                while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
+                    RAW_STATUS_OUTPUT=$(warp-cli --accept-tos status 2>&1 || true)
+                    echo "       [RAW] (尝试 $(($CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) ns$1 status: $RAW_STATUS_OUTPUT"
+                    if echo "$RAW_STATUS_OUTPUT" | grep -q "Status: Connected"; then
+                        CONNECTED=true
+                        break
+                    fi
+                    sleep 5
+                    CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
+                done
+
+                if [ "$CONNECTED" = false ]; then
+                    echo "错误：连接WARP后状态检查失败 (超时)。" >&2
+                    echo "------ 详细状态输出 ------" >&2
+                    warp-cli --accept-tos status >&2
+                    echo "------ warp-svc 进程 ------" >&2
+                    ps aux | grep warp >&2 || true
+                    echo "------ 网络测试 (nslookup) ------" >&2
+                    if command -v nslookup &> /dev/null; then
+                        nslookup api.cloudflareclient.com >&2 || true
+                    else
+                        echo "nslookup 未安装，跳过 DNS 测试。" >&2
+                    fi
+                    echo "------ 网络接口 ------" >&2
+                    ip addr >&2
+                    echo "------ 路由表 ------" >&2
+                    ip route >&2
+                    exit 1
+                fi
             ' bash "$i" "$CUSTOM_PROXY_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
-# 在开始检查状态之前，给WARP服务一点时间来处理连接请求和可能发生的设置更改
-        echo "     - 等待5秒让WARP服务稳定..."
-        sleep 5
             # 释放锁
             flock -u 200
 
         ) 200>/tmp/warp_pool_instance_$i.lock # 每个实例使用不同的锁文件，避免潜在冲突，并确保路径可靠
 
-        echo "     - 等待WARP连接成功..."
-        MAX_CONNECT_WAIT_ATTEMPTS=20 # 增加等待次数和超时
-        CONNECT_WAIT_COUNT=0
-        CONNECTED=false
-        while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
-            # 精确匹配 "Status: Connected"
-            # 放宽检查以匹配输出中的 "Status: Connected"，因为格式可能是 "Status update: Connected"。
-            # 同时重定向stderr以捕获所有输出。
-            if sudo ip netns exec ns$i warp-cli --accept-tos status 2>&1 | grep -q "Status: Connected"; then
-                CONNECTED=true
-                break
-            fi
-            # 获取更干净的状态信息用于日志输出
-            # 同样为日志记录重定向stderr，以捕获所有可能的输出
-            CURRENT_STATUS_LINE=$(sudo ip netns exec ns$i warp-cli --accept-tos status 2>&1 | grep "Status:" | head -n 1 || echo "Status: Error fetching status")
-            echo "       等待连接中... (尝试 $((CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) 当前状态: $CURRENT_STATUS_LINE"
-            sleep 5 # 增加等待时间
-            CONNECT_WAIT_COUNT=$((CONNECT_WAIT_COUNT+1))
-        done
-
-        if [ "$CONNECTED" = false ]; then
-            echo "错误：连接WARP后状态检查失败 (超时)。" >&2
-            echo "------ 详细状态输出 ------" >&2
-            sudo ip netns exec ns$i warp-cli --accept-tos status >&2
-            echo "------ warp-svc 进程 ------" >&2
-            sudo ip netns exec ns$i ps aux | grep warp >&2 || true
-            echo "------ 网络测试 (nslookup) ------" >&2
-            if sudo ip netns exec ns$i command -v nslookup &> /dev/null; then
-                sudo ip netns exec ns$i nslookup api.cloudflareclient.com >&2 || true
-            else
-                echo "nslookup 未安装，跳过 DNS 测试。" >&2
-            fi
-            echo "------ 网络接口 ------" >&2
-            sudo ip netns exec ns$i ip addr >&2
-            echo "------ 路由表 ------" >&2
-            sudo ip netns exec ns$i ip route >&2
-            echo "------ NAT 规则 ------" >&2
-            sudo iptables -t nat -L -n -v >&2
-            exit 1
-        fi
         echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
 
         # 8. 创建端口映射
