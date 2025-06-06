@@ -61,22 +61,30 @@ docker-compose down
 
 **前提条件**:
 *   一个基于 Debian/Ubuntu 的 Linux 系统。
-*   已安装 `python3`, `python3-pip`, `curl`, `iproute2`。
 *   拥有 `sudo` 权限。
-*   已根据 [Cloudflare 官方文档](https://pkg.cloudflareclient.com/) 安装 `warp-cli`。
 
 **启动步骤**:
 
-1.  克隆或下载本项目。
-2.  为所有 shell 脚本添加可执行权限：
+1.  **安装依赖**:
+    首先，为所有脚本添加可执行权限，然后运行依赖安装脚本。它会自动安装 `python3`, `pip`, `warp-cli` 等所有必需的工具。
     ```bash
     chmod +x *.sh
+    sudo ./install_dependencies.sh
     ```
-3.  执行启动脚本。该脚本会自动完成创建 WARP 实例、设置 Python 虚拟环境、安装依赖和启动管理服务的所有步骤。
+
+2.  **启动服务**:
+    执行启动脚本。该脚本会自动完成创建 WARP 实例、设置 Python 虚拟环境、安装依赖和启动管理服务的所有步骤。
     ```bash
     sudo ./start_proxy_pool.sh
     ```
-4.  服务将在后台运行，日志默认输出到 `proxy_manager.log` 文件。
+    服务将在后台运行，Python 管理器的日志默认输出到 `proxy_manager.log` 文件。
+
+**停止服务**:
+
+要停止代理池并清理所有相关的网络配置，请执行：
+```bash
+sudo ./stop_proxy_pool.sh
+```
 
 ## 🔌 API 端点
 
@@ -141,12 +149,11 @@ API 服务器默认运行在 `http://127.0.0.1:5000`。
 
 ## ⚙️ 配置
 
-主要的配置项位于以下文件中：
+所有的主要配置项都集中在 `create_warp_pool.sh` 脚本的顶部，方便统一管理：
 
-*   `proxy_manager.py`:
-    *   `POOL_SIZE`: WARP 代理池的大小，默认为 `5`。
-    *   `BACKEND_BASE_PORT`: 后端 WARP 实例的起始端口，默认为 `40000`。
-    *   `SOCKS_SERVER_PORT`: 中央 SOCKS5 服务器的监听端口，默认为 `10880`。
-*   `create_warp_pool.sh`:
-    *   `NUM_INSTANCES`: 要创建的 WARP 实例数量，**必须与 `proxy_manager.py` 中的 `POOL_SIZE` 保持一致**。
-    *   `BASE_PORT`: WARP SOCKS5 监听的起始端口，**必须与 `proxy_manager.py` 中的 `BACKEND_BASE_PORT` 保持一致**。
+*   `POOL_SIZE`: 代理池大小，即创建多少个WARP实例。默认为 `5`。
+*   `BASE_PORT`: 暴露给主机的SOCKS5代理的起始端口号。例如，如果设置为 `10800`，则5个实例的端口将是 `10800` 到 `10804`。
+*   `WARP_LICENSE_KEY`: (可选) 你的 WARP+ 许可证密钥。
+*   `WARP_ENDPOINT`: (可选) 自定义的 WARP 端点 IP 和端口。
+
+**重要**: `proxy_manager.py` 会自动从环境中读取 `POOL_SIZE` 和 `BASE_PORT`，因此你只需要在 `create_warp_pool.sh` 中修改即可，无需改动 Python 代码。
