@@ -300,18 +300,15 @@ create_pool() {
                 CONNECTED=false
                 while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
                     RAW_STATUS_OUTPUT=$(warp-cli --accept-tos status 2>&1 || true)
-                    # 使用 case 语句进行更健壮的模式匹配
-                    case "$RAW_STATUS_OUTPUT" in
-                      *"Status: Connected"*)
+                    # 使用 bash 的 [[ ... ]] 和 glob 模式匹配，这比 case 更直接，并且对环境的依赖更小
+                    if [[ "$RAW_STATUS_OUTPUT" == *"Connected"* ]]; then
                         echo "   ✅ WARP在 ns$1 中已成功初始化并连接。"
                         CONNECTED=true
                         break
-                        ;;
-                      *)
+                    else
                         # 如果没有连接，则记录原始输出以供调试
                         echo "       (尝试 $(($CONNECT_WAIT_COUNT+1))/$MAX_CONNECT_WAIT_ATTEMPTS) ns$1 status: $RAW_STATUS_OUTPUT"
-                        ;;
-                    esac
+                    fi
                     sleep 5
                     CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
                 done
