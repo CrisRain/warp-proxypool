@@ -33,24 +33,48 @@ echo "✅ IP转发已启用。"
 
 # 清理可能存在的旧规则和命名空间 (可选，但推荐用于幂等性)
 echo "🧹 开始清理旧的网络配置 (如果存在)..."
+
+# --- 清理旧的iptables规则 ---
+# 使用while循环确保删除所有匹配的规则，防止因脚本异常中断导致规则重复添加
+echo "   - 清理旧的iptables规则..."
+
+# 1. 清理 MASQUERADE 规则
+while sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/null; do
+    sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -j MASQUERADE
+done
+
+# 2. 清理每个实例的 DNAT 和 FORWARD 规则
+for i in $(seq 0 $(($POOL_SIZE-1))); do
+    HOST_PORT=$((BASE_PORT + $i))
+    NAMESPACE_IP="10.0.0.$((i+2))"
+    SOCKS_PORT=1080 # 与创建时保持一致
+
+    # 清理 DNAT 规则
+    while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT &> /dev/null; do
+        sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT
+    done
+
+    # 清理 FORWARD 规则
+    while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT &> /dev/null; do
+        sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT
+    done
+done
+echo "   ✅ 旧的iptables规则已清理。"
+
+# --- 清理旧的网络命名空间和veth设备 ---
+echo "   - 清理旧的网络命名空间和veth设备..."
 for i in $(seq 0 $(($POOL_SIZE-1))); do
     # 删除可能存在的旧网络命名空间
     if sudo ip netns list | grep -q "ns$i"; then
-        echo "   - 删除旧的网络命名空间 ns$i..."
-        sudo ip netns del ns$i || echo "警告：删除网络命名空间 ns$i 失败，可能它不存在或已被使用。"
+        sudo ip netns del ns$i &> /dev/null || true
     fi
     # 删除可能存在的旧veth设备
     if ip link show veth$i &> /dev/null; then
-        echo "   - 删除旧的虚拟以太网设备 veth$i..."
-        sudo ip link del veth$i || echo "警告：删除虚拟以太网设备 veth$i 失败。"
+        sudo ip link del veth$i &> /dev/null || true
     fi
 done
-# 清理iptables规则是一个更复杂的操作，这里暂时简化，仅提示
-# 注意：更完善的清理需要精确匹配并删除之前添加的iptables规则，避免影响其他服务。
-# 例如：sudo iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -j MASQUERADE (需要多次执行直到删除所有匹配规则)
-# sudo iptables -t nat -F PREROUTING (会清空整个链，需谨慎)
-# sudo iptables -F FORWARD (会清空整个链，需谨慎)
-echo "ℹ️  旧的网络命名空间和veth设备清理尝试完成。iptables规则清理请根据实际情况手动操作或完善脚本。"
+echo "   ✅ 旧的网络命名空间和veth设备已清理。"
+echo "✅ 旧的网络配置清理完成。"
 
 
 echo "🚀 开始创建 WARP 代理池..."
@@ -61,18 +85,18 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     echo "-----------------------------------------------------"
 
     # 1. 创建网络命名空间
-    echo "   - 步骤1/7: 创建网络命名空间 ns$i..."
+    echo "   - 步骤1/9: 创建网络命名空间 ns$i..."
     sudo ip netns add ns$i || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
     echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
     # 2. 创建虚拟以太网设备对 (veth pair)
     # veth$i 在主命名空间, veth${i}-ns 在 ns$i 命名空间
-    echo "   - 步骤2/7: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
+    echo "   - 步骤2/9: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
     sudo ip link add veth$i type veth peer name veth${i}-ns || { echo "错误：创建虚拟以太网设备对 veth$i <--> veth${i}-ns 失败。" >&2; exit 1; }
     echo "   ✅ 虚拟以太网设备对创建成功。"
 
     # 3. 配置虚拟以太网设备
-    echo "   - 步骤3/7: 配置虚拟以太网设备..."
+    echo "   - 步骤3/9: 配置虚拟以太网设备..."
     # 将 veth${i}-ns 移入网络命名空间 ns$i
     sudo ip link set veth${i}-ns netns ns$i || { echo "错误：将 veth${i}-ns 移入 ns$i 失败。" >&2; exit 1; }
     # 为命名空间内的 veth${i}-ns 分配IP地址
@@ -82,14 +106,14 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     echo "   ✅ 虚拟以太网设备配置成功。"
 
     # 4. 启动虚拟以太网设备
-    echo "   - 步骤4/7: 启动虚拟以太网设备..."
+    echo "   - 步骤4/9: 启动虚拟以太网设备..."
     sudo ip link set veth$i up || { echo "错误：启动 veth$i 失败。" >&2; exit 1; }
     sudo ip netns exec ns$i ip link set veth${i}-ns up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
     echo "   ✅ 虚拟以太网设备已启动。"
 
     # 5. 设置命名空间内的默认路由
     # 使命名空间 ns$i 内的流量通过 veth$i (10.0.0.1) 路由出去
-    echo "   - 步骤5/7: 设置 ns$i 内的默认路由指向 10.0.0.1..."
+    echo "   - 步骤5/9: 设置 ns$i 内的默认路由指向 10.0.0.1..."
     sudo ip netns exec ns$i ip route add default via 10.0.0.1 || { echo "错误：在 ns$i 中设置默认路由失败。" >&2; exit 1; }
     echo "   ✅ ns$i 默认路由设置成功。"
 
@@ -97,7 +121,7 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     # 允许来自 10.0.0.0/24 网段 (即所有命名空间) 的流量通过主机的出口进行MASQUERADE (源地址伪装)
     # 注意: 这条规则是全局的，只需要设置一次。但为了脚本的幂等性和清晰性，放在循环内问题不大，iptables会自动处理重复规则。
     # 更优的做法是检查规则是否存在，不存在则添加。
-    echo "   - 步骤6/7: 配置NAT规则 (MASQUERADE)..."
+    echo "   - 步骤6/9: 配置NAT规则 (MASQUERADE)..."
     if ! sudo iptables -t nat -C POSTROUTING -s 10.0.0.0/24 -j MASQUERADE &> /dev/null; then
         sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -j MASQUERADE || { echo "错误：配置NAT (MASQUERADE) 规则失败。" >&2; exit 1; }
         echo "   ✅ NAT (MASQUERADE) 规则已添加。"
@@ -106,8 +130,15 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     fi
 
     # 7. 在命名空间中初始化并连接WARP
-    echo "   - 步骤7/8: 在 ns$i 中初始化并连接WARP..."
+    echo "   - 步骤7/9: 在 ns$i 中初始化并连接WARP..."
+    echo "     - 启动WARP服务守护进程..."
+    # 在后台启动warp-svc，它是warp-cli的守护进程
+    sudo ip netns exec ns$i warp-svc &
+    # 等待几秒钟，确保warp-svc完全启动
+    sleep 3
     echo "     - 注册WARP..."
+    # 设置代理模式为SOCKS，这样dante才能接管
+    sudo ip netns exec ns$i warp-cli set-mode proxy || { echo "错误：在 ns$i 中设置WARP代理模式失败。" >&2; exit 1; }
     sudo ip netns exec ns$i warp-cli --accept-tos registration new || echo "警告：WARP注册可能已完成或失败，请检查 warp-cli 日志。"
     echo "     - 连接WARP..."
     sudo ip netns exec ns$i warp-cli connect || { echo "错误：在 ns$i 中连接WARP失败。" >&2; exit 1; }
@@ -124,7 +155,7 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     DANTED_CONF_FILE="/tmp/danted_ns${i}.conf"
     NAMESPACE_IP="10.0.0.$((i+2))" # 对应步骤3中分配的IP
 
-    echo "   - 步骤8/8: 在 ns$i 中启动SOCKS5代理 (dante-server)..."
+    echo "   - 步骤8/9: 在 ns$i 中启动SOCKS5代理 (dante-server)..."
     # 动态生成dante配置文件
     cat > "$DANTED_CONF_FILE" <<EOF
 logoutput: stderr
