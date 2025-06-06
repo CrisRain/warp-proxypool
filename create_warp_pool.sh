@@ -249,7 +249,7 @@ create_pool() {
         CONNECTED=false
         while [ $CONNECT_WAIT_COUNT -lt $MAX_CONNECT_WAIT_ATTEMPTS ]; do
             # 兼容多种 warp-cli 输出
-            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -Eqi "Status: Connected|Registered|Account type"; then
+            if sudo ip netns exec ns$i warp-cli --accept-tos status | grep -Eqi "Connected|Registered|Account type"; then
                 CONNECTED=true
                 break
             fi
