@@ -174,13 +174,13 @@ EOF
             # 6. 配置NAT和转发规则
             echo "   - 步骤6/8: 配置NAT和转发规则..."
             if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -j MASQUERADE &> /dev/null; then
-                sudo iptables -t nat -A POSTROUTING -s "$SUBNET" -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
+                sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
             fi
             if ! sudo iptables -C FORWARD -s "$SUBNET" -j ACCEPT &> /dev/null; then
-                sudo iptables -A FORWARD -s "$SUBNET" -j ACCEPT || { echo "错误：配置出向FORWARD规则失败。" >&2; exit 1; }
+                sudo iptables -I FORWARD -s "$SUBNET" -j ACCEPT || { echo "错误：配置出向FORWARD规则失败。" >&2; exit 1; }
             fi
             if ! sudo iptables -C FORWARD -d "$SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &> /dev/null; then
-                sudo iptables -A FORWARD -d "$SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || { echo "错误：配置入向FORWARD规则失败。" >&2; exit 1; }
+                sudo iptables -I FORWARD -d "$SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || { echo "错误：配置入向FORWARD规则失败。" >&2; exit 1; }
             fi
             echo "   ✅ NAT和转发规则配置成功。"
 
@@ -290,10 +290,10 @@ EOF
             HOST_PORT=$((BASE_PORT + $i))
             echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE..."
             if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; then
-                sudo iptables -t nat -A PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE || { echo "错误：创建DNAT规则失败。" >&2; exit 1; }
+                sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE || { echo "错误：创建DNAT规则失败。" >&2; exit 1; }
             fi
             if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT &> /dev/null; then
-                sudo iptables -A FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
+                sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
             fi
             echo "   ✅ 端口映射创建成功。"
 
