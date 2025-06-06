@@ -292,6 +292,9 @@ create_pool() {
                 warp-cli --accept-tos connect || { echo "错误：连接WARP失败。" >&2; exit 1; }
             ' bash "$i" "$CUSTOM_PROXY_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
+# 在开始检查状态之前，给WARP服务一点时间来处理连接请求和可能发生的设置更改
+        echo "     - 等待5秒让WARP服务稳定..."
+        sleep 5
             # 释放锁
             flock -u 200
 
