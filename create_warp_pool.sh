@@ -106,43 +106,63 @@ for i in $(seq 0 $(($POOL_SIZE-1))); do
     fi
 
     # 7. 在命名空间中初始化并连接WARP
-    WARP_PROXY_PORT=$((40000 + $i)) # WARP内部监听的SOCKS5端口
-    echo "   - 步骤7/7: 在 ns$i 中初始化并连接WARP (内部代理端口: $WARP_PROXY_PORT)..."
-    # 注册WARP (通常只需要一次，但重复执行通常无害)
+    echo "   - 步骤7/8: 在 ns$i 中初始化并连接WARP..."
     echo "     - 注册WARP..."
-    sudo ip netns exec ns$i warp-cli --accept-tos register || echo "警告：WARP注册可能已完成或失败，请检查 warp-cli 日志。" # 允许失败，可能已经注册
-    # 设置WARP为代理模式
-    echo "     - 设置WARP为代理模式..."
-    sudo ip netns exec ns$i warp-cli set-mode proxy || { echo "错误：在 ns$i 中设置WARP为代理模式失败。" >&2; exit 1; }
-    # 设置WARP代理监听端口
-    echo "     - 设置WARP代理端口为 $WARP_PROXY_PORT..."
-    sudo ip netns exec ns$i warp-cli set-proxy-port $WARP_PROXY_PORT || { echo "错误：在 ns$i 中设置WARP代理端口失败。" >&2; exit 1; }
-    # 连接WARP
+    sudo ip netns exec ns$i warp-cli --accept-tos registration new || echo "警告：WARP注册可能已完成或失败，请检查 warp-cli 日志。"
     echo "     - 连接WARP..."
     sudo ip netns exec ns$i warp-cli connect || { echo "错误：在 ns$i 中连接WARP失败。" >&2; exit 1; }
+    # 检查连接状态
+    if ! sudo ip netns exec ns$i warp-cli status | grep -q "Status: Connected"; then
+        echo "错误：在 ns$i 中连接WARP后状态检查失败。" >&2
+        sudo ip netns exec ns$i warp-cli status >&2
+        exit 1
+    fi
     echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
 
-    # 8. 创建端口映射 (DNAT)
-    # 将主机上的 $((BASE_PORT + $i)) 端口的TCP流量，转发到命名空间 ns$i 内的 10.0.0.$((i+2)):$WARP_PROXY_PORT
-    HOST_PORT=$((BASE_PORT + $i))
+    # 8. 在命名空间中启动SOCKS5代理 (dante-server)
+    SOCKS_PORT=1080 # SOCKS5服务在命名空间内部监听的端口
+    DANTED_CONF_FILE="/tmp/danted_ns${i}.conf"
     NAMESPACE_IP="10.0.0.$((i+2))" # 对应步骤3中分配的IP
-    echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$WARP_PROXY_PORT (ns$i)..."
-    # PREROUTING链用于DNAT：修改目标地址
-    # 检查规则是否存在，避免重复添加
-    if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_PROXY_PORT &> /dev/null; then
-        sudo iptables -t nat -A PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_PROXY_PORT || { echo "错误：创建DNAT规则失败 (PREROUTING)。" >&2; exit 1; }
-    else
-        echo "   ℹ️  DNAT PREROUTING 规则已存在 for port $HOST_PORT."
-    fi
-    # FORWARD链用于允许数据包通过防火墙
-    if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $WARP_PROXY_PORT -j ACCEPT &> /dev/null; then
-        sudo iptables -A FORWARD -p tcp -d $NAMESPACE_IP --dport $WARP_PROXY_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
-    else
-        echo "   ℹ️  DNAT FORWARD 规则已存在 for port $HOST_PORT."
-    fi
-    echo "   ✅ 端口映射创建成功: 主机 $HOST_PORT <--> ns$i ($NAMESPACE_IP:$WARP_PROXY_PORT)"
 
-    echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT (内部WARP端口: $WARP_PROXY_PORT)"
+    echo "   - 步骤8/8: 在 ns$i 中启动SOCKS5代理 (dante-server)..."
+    # 动态生成dante配置文件
+    cat > "$DANTED_CONF_FILE" <<EOF
+logoutput: stderr
+internal: $NAMESPACE_IP port = $SOCKS_PORT
+external: veth${i}-ns
+method: none
+user.privileged: root
+user.unprivileged: nobody
+
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect error
+}
+
+pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    protocol: tcp udp
+    log: connect error
+}
+EOF
+    # 在命名空间内启动dante-server
+    sudo ip netns exec ns$i danted -f "$DANTED_CONF_FILE" -D || { echo "错误：在 ns$i 中启动dante-server失败。" >&2; exit 1; }
+    echo "   ✅ SOCKS5代理 (dante-server) 已在 ns$i 中启动，监听在 $NAMESPACE_IP:$SOCKS_PORT。"
+
+    # 9. 创建端口映射 (DNAT)
+    HOST_PORT=$((BASE_PORT + $i))
+    echo "   - 步骤9/9: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCKS_PORT (ns$i)..."
+    # PREROUTING链用于DNAT
+    if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT &> /dev/null; then
+        sudo iptables -t nat -A PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT || { echo "错误：创建DNAT规则失败 (PREROUTING)。" >&2; exit 1; }
+    fi
+    # FORWARD链用于允许数据包通过
+    if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT &> /dev/null; then
+        sudo iptables -A FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
+    fi
+    echo "   ✅ 端口映射创建成功: 主机 $HOST_PORT <--> ns$i ($NAMESPACE_IP:$SOCKS_PORT)"
+
+    echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT (内部dante端口: $SOCKS_PORT)"
 done
 
 echo "====================================================="

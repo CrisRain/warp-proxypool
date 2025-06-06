@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     sudo \
     lsb-release \
+    dante-server \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 cloudflare-warp
