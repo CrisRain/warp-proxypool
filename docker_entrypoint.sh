@@ -35,9 +35,11 @@ echo "-----------------------------------------------------"
 echo "✅ WARP实例和网络命名空间创建成功 (由 ${CREATE_WARP_POOL_SCRIPT} 完成)。"
 
 
-# 步骤2: 移交控制权
+# 步骤2: 启动代理管理API
 echo "-----------------------------------------------------"
-echo "✅ WARP代理池已创建，入口脚本执行完毕。"
-echo "将控制权移交给 docker-compose.yml 中定义的 command..."
+echo "🐍 步骤2: 启动代理管理API (${PROXY_MANAGER_SCRIPT})..."
 echo "-----------------------------------------------------"
-exec "$@"
+# 直接在前台运行 Python 应用，以便 Docker 可以管理其生命周期并收集日志
+# 日志将直接输出到 stdout/stderr
+echo "代理管理API日志将输出到容器日志 (stdout/stderr)..."
+exec $PYTHON_CMD "$PROXY_MANAGER_SCRIPT"

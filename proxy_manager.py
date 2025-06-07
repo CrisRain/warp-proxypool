@@ -332,15 +332,10 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
 
         try:
             log_message(f"SOCKS处理器 {client_ip_str}: 正在通过后端SOCKS5 {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 ({target_host_str}, {target_port_int})...")
-            
-            # 根据端口号动态计算后端WARP实例的IP地址
-            proxy_index = acquired_backend_port - BASE_PORT
-            backend_warp_ip = f"10.0.{proxy_index}.2"
-
             remote_connection_to_target = socks.create_connection(
                 (target_host_str, target_port_int),
                 proxy_type=socks.SOCKS5,
-                proxy_addr=backend_warp_ip,
+                proxy_addr=WARP_INSTANCE_IP,
                 proxy_port=acquired_backend_port,
                 timeout=20
             )
