@@ -201,6 +201,9 @@ EOF
                 WARP_LICENSE_KEY="$3"
                 WARP_ENDPOINT="$4"
                 
+                # 关闭继承的锁文件描述符，防止子进程持有锁
+                exec 200>&-
+
                 # 检查外网连通性
                 echo "     - 检查外网连通性..."
                 if ! timeout 10s ping -c 1 api.cloudflareclient.com >/dev/null 2>&1; then
@@ -294,9 +297,12 @@ EOF
             SOCAT_LISTEN_PORT=40001
             echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT} 转发到 127.0.0.1:${WARP_INTERNAL_PORT}..."
             
-            # 在后台使用 nsenter 和 nohup 启动 socat，以实现真正的后台运行
-            sudo nsenter --net="/var/run/netns/ns$i" \
-                nohup socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" >/dev/null 2>&1 &
+            # 在后台使用 nsenter 和 nohup 启动 socat，并关闭文件描述符以避免持有锁
+            (
+                exec 200>&- # 确保子进程不继承锁文件描述符
+                sudo nsenter --net="/var/run/netns/ns$i" \
+                    nohup socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" >/dev/null 2>&1 &
+            )
             
             sleep 2 # 等待 socat 启动
             
