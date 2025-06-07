@@ -41,7 +41,7 @@ REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 # 注意: 这些配置应与 create_warp_pool.sh 脚本保持一致
 POOL_SIZE = int(os.environ.get('POOL_SIZE', 3))
 BASE_PORT = int(os.environ.get('BASE_PORT', 10800))
-# WARP_INSTANCE_IP = '127.0.0.1' # 不再需要这个全局变量
+WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
 IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
 
 # --- 代理状态管理 ---
@@ -328,21 +328,18 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
                 "backend_warp_port_used": acquired_backend_port,
                 "acquired_at": time.time()
             }
-        # 动态计算后端WARP实例的网关IP
-        proxy_index = acquired_backend_port - BASE_PORT
-        backend_warp_gateway_ip = f"10.0.{proxy_index}.1"
-        log_message(f"SOCKS处理器 {client_ip_str}: 已获取后端WARP {backend_warp_gateway_ip}:{acquired_backend_port} 用于连接 -> {target_host_str}:{target_port_int}")
+        log_message(f"SOCKS处理器 {client_ip_str}: 已获取后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 用于连接 -> {target_host_str}:{target_port_int}")
 
         try:
-            log_message(f"SOCKS处理器 {client_ip_str}: 正在通过后端SOCKS5 {backend_warp_gateway_ip}:{acquired_backend_port} 连接到 ({target_host_str}, {target_port_int})...")
+            log_message(f"SOCKS处理器 {client_ip_str}: 正在通过后端SOCKS5 {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 ({target_host_str}, {target_port_int})...")
             remote_connection_to_target = socks.create_connection(
                 (target_host_str, target_port_int),
                 proxy_type=socks.SOCKS5,
-                proxy_addr=backend_warp_gateway_ip, # 使用动态计算的网关IP
+                proxy_addr=WARP_INSTANCE_IP,
                 proxy_port=acquired_backend_port,
                 timeout=20
             )
-            log_message(f"SOCKS处理器 {client_ip_str}: 已通过后端WARP {backend_warp_gateway_ip}:{acquired_backend_port} 成功连接到 {target_host_str}:{target_port_int}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 已通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 成功连接到 {target_host_str}:{target_port_int}")
             
             bound_addr_bytes = socket.inet_aton("0.0.0.0") 
             bound_port_bytes = struct.pack("!H", 0) 
@@ -350,9 +347,7 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             client_socket.sendall(reply)
 
         except socks.ProxyConnectionError as e_pysocks: 
-            proxy_index = acquired_backend_port - BASE_PORT
-            backend_warp_gateway_ip = f"10.0.{proxy_index}.1"
-            log_message(f"SOCKS处理器 {client_ip_str}: 后端WARP {backend_warp_gateway_ip}:{acquired_backend_port} 无法连接到目标 {target_host_str}:{target_port_int}。PySocks错误: {e_pysocks}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 无法连接到目标 {target_host_str}:{target_port_int}。PySocks错误: {e_pysocks}")
             socks_reply_code = REP_HOST_UNREACHABLE 
             if "Connection refused" in str(e_pysocks): socks_reply_code = REP_CONNECTION_REFUSED
             elif "Host unreachable" in str(e_pysocks): socks_reply_code = REP_HOST_UNREACHABLE
@@ -363,9 +358,7 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             acquired_backend_port = None 
             return
         except socket.timeout: 
-            proxy_index = acquired_backend_port - BASE_PORT
-            backend_warp_gateway_ip = f"10.0.{proxy_index}.1"
-            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {backend_warp_gateway_ip}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 超时")
+            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 超时")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_TTL_EXPIRED, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
@@ -379,9 +372,7 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             acquired_backend_port = None
             return
         except Exception as e_conn_target: 
-            proxy_index = acquired_backend_port - BASE_PORT
-            backend_warp_gateway_ip = f"10.0.{proxy_index}.1"
-            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {backend_warp_gateway_ip}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 时发生未知错误。错误: {e_conn_target}")
+            log_message(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 时发生未知错误。错误: {e_conn_target}")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_GENERAL_FAILURE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
             client_socket.sendall(reply)
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
