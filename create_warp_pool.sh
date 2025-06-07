@@ -156,11 +156,61 @@ cleanup() {
 
     # 3. 杀死所有可能残留的全局进程作为最后手段
     printf "   - 步骤3: 停止所有残留的 WARP 和转发进程 (全局)...\n"
-    sudo pkill -9 -f warp-svc >/dev/null 2>&1 || true
-    sudo pkill -9 -f warp-cli >/dev/null 2>&1 || true
-    sudo pkill -9 -f socat >/dev/null 2>&1 || true
-    sleep 1
-    printf "   ✅ 全局 WARP 和转发进程已清理。\n"
+    
+    # 改进 pkill 的健壮性
+    # 检查 warp-svc 进程
+    if pgrep -f "warp-svc" >/dev/null; then
+        printf "     - 发现 warp-svc 进程，正在尝试停止...\n"
+        if sudo pkill -9 -f "warp-svc"; then
+            printf "     ✅ warp-svc 进程已停止。\n"
+        else
+            printf "     ⚠️  尝试停止 warp-svc 进程时 pkill 返回非0 (可能进程已自行退出或部分停止)。\n"
+        fi
+    else
+        printf "     ℹ️  未发现活动的 warp-svc 进程。\n"
+    fi
+
+    # 检查 warp-cli 进程
+    if pgrep -f "warp-cli" >/dev/null; then
+        printf "     - 发现 warp-cli 进程，正在尝试停止...\n"
+        if sudo pkill -9 -f "warp-cli"; then
+            printf "     ✅ warp-cli 进程已停止。\n"
+        else
+            printf "     ⚠️  尝试停止 warp-cli 进程时 pkill 返回非0 (可能进程已自行退出或部分停止)。\n"
+        fi
+    else
+        printf "     ℹ️  未发现活动的 warp-cli 进程。\n"
+    fi
+
+    # 检查 socat 进程
+    # 为了更精确地匹配由脚本启动的socat进程，我们查找包含特定监听端口的socat命令
+    # 脚本中 SOCAT_LISTEN_PORT 通常是 40001
+    # 命令格式通常是 nohup socat TCP4-LISTEN:...
+    # 一个相对安全的匹配模式是 "socat TCP4-LISTEN:40001"
+    SOCAT_PATTERN_SPECIFIC="socat TCP4-LISTEN:40001"
+    SOCAT_PATTERN_GENERIC="socat"
+
+    if pgrep -f "$SOCAT_PATTERN_SPECIFIC" >/dev/null; then
+        printf "     - 发现特定的 socat 进程 ('%s')，正在尝试停止...\n" "$SOCAT_PATTERN_SPECIFIC"
+        if sudo pkill -9 -f "$SOCAT_PATTERN_SPECIFIC"; then
+            printf "     ✅ 特定的 socat 进程已停止。\n"
+        else
+            printf "     ⚠️  尝试停止特定的 socat 进程时 pkill 返回非0 (可能进程已自行退出或部分停止)。\n"
+        fi
+    elif pgrep -f "$SOCAT_PATTERN_GENERIC" >/dev/null; then
+        # 如果特定的找不到，再尝试通用的，并给出警告
+        printf "     - 未找到特定 socat 进程，但发现通用 socat 进程。正在尝试停止 (这可能误杀其他 socat 实例)...\n"
+        if sudo pkill -9 -f "$SOCAT_PATTERN_GENERIC"; then
+            printf "     ✅ 通用 socat 进程已停止。\n"
+        else
+            printf "     ⚠️  尝试停止通用 socat 进程时 pkill 返回非0 (可能进程已自行退出或部分停止)。\n"
+        fi
+    else
+        printf "     ℹ️  未发现活动的 socat 进程。\n"
+    fi
+    
+    sleep 1 # 等待进程完全终止
+    printf "   ✅ 全局 WARP 和转发进程清理操作已执行完毕。\n"
     
     # 4. 清理锁文件
     printf "   - 步骤4: 清理锁文件...\n"
@@ -369,7 +419,7 @@ create_pool() {
                 done
                 printf "   ✅ WARP在 ns%s 中已成功初始化并连接。\n" "$1"
 
-                printf "     - 使用 endpoint reset 刷新IP...\n"
+                printf "     - 正在为 WARP %s (命名空间: ns%s) 使用 warp-cli --accept-tos tunnel endpoint reset 命令刷新 IP...\n" "$1" "$1"
                 warp-cli --accept-tos tunnel endpoint reset >/dev/null 2>&1 || { printf "错误：使用 endpoint reset 刷新IP失败。\n" >&2; exit 1; }
                 # 等待命令生效
                 sleep 3
