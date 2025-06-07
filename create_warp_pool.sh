@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # --- 配置参数 ---
-POOL_SIZPOOL_SIZE=3      # 代理池大小，即创建多少个WARP实例
+POOL_SIZE=3      # 代理池大小，即创建多少个WARP实例
 BASE_PORT=10800  # SOCKS5代理的基础端口号
 
 # WARP+ 许可证密钥 (可选)
