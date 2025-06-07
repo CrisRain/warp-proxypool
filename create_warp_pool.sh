@@ -79,11 +79,12 @@ cleanup() {
         while sudo iptables -t nat -C POSTROUTING -s $SUBNET -j MASQUERADE &> /dev/null; do
             sudo iptables -t nat -D POSTROUTING -s $SUBNET -j MASQUERADE
         done
+        # 清理简化的双向转发规则
         while sudo iptables -C FORWARD -s $SUBNET -j ACCEPT &> /dev/null; do
             sudo iptables -D FORWARD -s $SUBNET -j ACCEPT
         done
-        while sudo iptables -C FORWARD -d $SUBNET -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -d $SUBNET -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+        while sudo iptables -C FORWARD -d $SUBNET -j ACCEPT &> /dev/null; do
+            sudo iptables -D FORWARD -d $SUBNET -j ACCEPT
         done
     done
     echo "   ✅ 旧的iptables规则已清理。"
@@ -165,7 +166,9 @@ EOF
             echo "   - 步骤4/8: 启动虚拟以太网设备..."
             sudo ip link set "veth$i" up || { echo "错误：启动 veth$i 失败。" >&2; exit 1; }
             sudo ip netns exec "ns$i" ip link set "veth${i}-ns" up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
-            echo "   ✅ 虚拟以太网设备已启动。"
+            # 为命名空间内的veth设备设置MTU，防止因WARP封装导致的数据包过大问题
+            sudo ip netns exec "ns$i" ip link set dev "veth${i}-ns" mtu 1420 || { echo "警告：为 veth${i}-ns 设置MTU失败，可能会影响连接稳定性。" >&2; }
+            echo "   ✅ 虚拟以太网设备已启动并设置MTU。"
 
             # 4.5. 禁用反向路径过滤 (解决某些环境下NAT转发问题)
             echo "   - 步骤4.5/8: 禁用 veth$i 上的反向路径过滤..."
@@ -182,11 +185,12 @@ EOF
             if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -j MASQUERADE &> /dev/null; then
                 sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
             fi
+            # 简化转发规则：允许子网的所有出站和入站流量
             if ! sudo iptables -C FORWARD -s "$SUBNET" -j ACCEPT &> /dev/null; then
                 sudo iptables -I FORWARD -s "$SUBNET" -j ACCEPT || { echo "错误：配置出向FORWARD规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -C FORWARD -d "$SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &> /dev/null; then
-                sudo iptables -I FORWARD -d "$SUBNET" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT || { echo "错误：配置入向FORWARD规则失败。" >&2; exit 1; }
+            if ! sudo iptables -C FORWARD -d "$SUBNET" -j ACCEPT &> /dev/null; then
+                sudo iptables -I FORWARD -d "$SUBNET" -j ACCEPT || { echo "错误：配置入向FORWARD规则失败。" >&2; exit 1; }
             fi
             echo "   ✅ NAT和转发规则配置成功。"
 
@@ -325,9 +329,10 @@ EOF
             if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
                 sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; then
-                sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
-            fi
+            # 此处的特定端口转发规则不再需要，因为已被上面更通用的 -d $SUBNET 规则覆盖
+            # if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; then
+            #     sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
+            # fi
             echo "   ✅ 端口映射创建成功。"
 
             echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT"
