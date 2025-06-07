@@ -20,10 +20,20 @@ log() {
     local level=$1
     local message=$2
     local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    local log_entry
+    log_entry=$(printf "[%s] [%s] %s" "$timestamp" "$level" "$message")
     # 输出到标准错误 (控制台)
-    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >&2
-    # 同时追加到日志文件
-    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "$LOG_FILE"
+    echo "$log_entry" >&2
+    # 同时追加到日志文件，使用sudo tee以处理权限问题
+    # 确保SUDO变量在使用前已定义，脚本稍后会定义它
+    if [ -z "${SUDO+x}" ]; then # 检查SUDO是否已设置
+        # 在SUDO定义前，直接尝试写入，或缓冲日志稍后写入
+        # 为简单起见，早期日志可能只输出到stderr，或依赖后续的sudo touch/chmod
+        echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
+    else
+        # 使用sudo tee写入文件，并确保tee本身不向标准输出或标准错误输出任何内容
+        echo "$log_entry" | $SUDO tee -a "$LOG_FILE" >/dev/null 2>&1
+    fi
 }
 
 # --- 前置检查 ---
@@ -51,13 +61,20 @@ else
 fi
 
 # 启动sudo会话保持进程
-if $SUDO -n true 2>/dev/null; then
-    log "INFO" "✅ 无密码sudo权限检查通过，启动sudo会话保持进程。"
-    # 在后台循环中运行 `sudo -v` 来刷新sudo时间戳
-    while true; do $SUDO -n true; sleep 60; kill -0 "$$" || exit; done &>/dev/null &
-    SUDO_KEEPALIVE_PID=$!
-    # 设置一个陷阱，在脚本退出时杀死后台进程
-    trap "$SUDO kill $SUDO_KEEPALIVE_PID &>/dev/null" EXIT
+if [ -n "$SUDO" ]; then # 仅当SUDO变量非空时 (即需要sudo时)
+    if $SUDO -n true 2>/dev/null; then
+        log "INFO" "✅ 无密码sudo权限检查通过，启动sudo会话保持进程。"
+        # 在后台循环中运行 `sudo -v` 来刷新sudo时间戳
+        while true; do $SUDO -n true; sleep 60; kill -0 "$$" || exit; done &>/dev/null &
+        SUDO_KEEPALIVE_PID=$!
+        # 设置一个陷阱，在脚本退出时杀死后台进程
+        # 确保SUDO_KEEPALIVE_PID已设置
+        trap '[ -n "${SUDO_KEEPALIVE_PID-}" ] && '"$SUDO"' kill "$SUDO_KEEPALIVE_PID" &>/dev/null' EXIT
+    else
+        log "WARNING" "⚠️  无密码sudo权限似乎不可用或已过期，无法启动sudo会话保持。后续操作可能频繁请求密码。"
+    fi
+else
+    log "INFO" "ℹ️  以root身份运行，无需sudo会话保持。"
 fi
 
 # --- 函数定义 ---
@@ -132,40 +149,110 @@ cleanup() {
     log "INFO" "   ✅ 网络命名空间、veth设备及相关配置已清理。"
     
     # 2. 清理 iptables 规则
-    log "INFO" "   - 步骤2: 清理iptables规则..."
-    
-    # 清理所有与脚本相关的DNAT规则
-    $SUDO iptables-save | grep -E -- '--dport (108[0-9]{2}|400[0-9]{2})' | while read rule; do
-        # 解析规则并删除
-        local table=$(echo "$rule" | awk '{print $1}')
-        local chain=$(echo "$rule" | awk '{print $2}')
-        local rule_content=$(echo "$rule" | sed -E 's/^-A //; s/-j DNAT.*//')
-        
-        if [ -n "$rule_content" ]; then
-            log "INFO" "     - 删除DNAT规则: $table $chain $rule_content"
-            $SUDO iptables -t "$table" -D "$chain" $rule_content -j DNAT >/dev/null 2>&1 || true
+    log "INFO" "   - 步骤2: 清理iptables规则 (更精确的方式)..."
+
+    # 收集所有由本脚本管理的网络命名空间的相关参数
+    # 这些参数定义了脚本创建的规则的“签名”
+    declare -A script_subnets
+    declare -A script_host_ports
+    declare -A script_namespace_ips
+    declare -A script_socat_ports
+
+    for NS_NAME_CLEANUP in $($SUDO ip netns list 2>/dev/null | awk '{print $1}'); do
+        if [[ "$NS_NAME_CLEANUP" =~ ^ns([0-9]+)$ ]]; then
+            local idx_cleanup=${BASH_REMATCH[1]}
+            script_host_ports[$((BASE_PORT + idx_cleanup))]=1
+
+            local subnet_third_octet_cleanup=$((idx_cleanup / 256))
+            local subnet_fourth_octet_cleanup=$((idx_cleanup % 256))
+            script_namespace_ips["10.${subnet_third_octet_cleanup}.${subnet_fourth_octet_cleanup}.2"]=1
+            script_subnets["10.${subnet_third_octet_cleanup}.${subnet_fourth_octet_cleanup}.0/24"]=1
+            # WARP_INTERNAL_PORT=$((40000 + i)), SOCAT_LISTEN_PORT=$((40001 + i))
+            # DNAT target is SOCAT_LISTEN_PORT
+            script_socat_ports[$((40001 + idx_cleanup))]=1
         fi
     done
-    
-    # 清理FORWARD规则
-    $SUDO iptables-save | grep -E '10\.0\.[0-9]+\.[0-9]+' | while read rule; do
-        local chain=$(echo "$rule" | awk '{print $2}')
-        local rule_content=$(echo "$rule" | sed -E 's/^-A //; s/-j ACCEPT.*//')
-        
-        if [ -n "$rule_content" ]; then
-            log "INFO" "     - 删除FORWARD规则: $chain $rule_content"
-            $SUDO iptables -D "$chain" $rule_content -j ACCEPT >/dev/null 2>&1 || true
+
+    current_table=""
+    # 使用进程替换来读取 iptables-save 的输出
+    while IFS= read -r rule_line; do
+        if [[ "$rule_line" == \** ]]; then # 表名行, 例如 *nat
+            current_table="${rule_line#\*}"
+            continue
         fi
-    done
-    
-    # 清理MASQUERADE规则
-    $SUDO iptables -t nat -S POSTROUTING | grep '10.0.' | while read rule; do
-        local rule_content=$(echo "$rule" | sed 's/-A POSTROUTING //')
-        log "INFO" "     - 删除MASQUERADE规则: $rule_content"
-        $SUDO iptables -t nat -D POSTROUTING $rule_content >/dev/null 2>&1 || true
-    done
-    
-    log "INFO" "   ✅ 旧的iptables规则已清理。"
+
+        if [[ "$rule_line" == -A* ]]; then # 规则行, 例如 -A PREROUTING ...
+            local chain_name=$(echo "$rule_line" | awk '{print $2}')
+            # 获取 "-A CHAIN" 之后的规则部分
+            local rule_spec=$(echo "$rule_line" | sed 's/^-A [^ ]* //')
+            local should_delete=0
+
+            # 检查 DNAT 规则 (在 nat 表中)
+            if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j DNAT"* ]]; then
+                local dport_val=""
+                local to_dest_ip_val=""
+                local to_dest_port_val=""
+
+                if [[ "$rule_spec" =~ --dport[[:space:]]+([0-9]+) ]]; then
+                    dport_val="${BASH_REMATCH[1]}"
+                fi
+                if [[ "$rule_spec" =~ --to-destination[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+) ]]; then
+                    to_dest_ip_val="${BASH_REMATCH[1]}"
+                    to_dest_port_val="${BASH_REMATCH[2]}"
+                fi
+
+                if [ -n "$dport_val" ] && [ -n "$to_dest_ip_val" ] && [ -n "$to_dest_port_val" ]; then
+                    # 检查提取到的端口和IP是否由本脚本管理
+                    if [[ -n "${script_host_ports[$dport_val]}" && \
+                          -n "${script_namespace_ips[$to_dest_ip_val]}" && \
+                          -n "${script_socat_ports[$to_dest_port_val]}" ]]; then
+                        # 进一步检查链名是否为 PREROUTING 或 OUTPUT (针对127.0.0.1的流量)
+                        if [[ "$chain_name" == "PREROUTING" || \
+                              ( "$chain_name" == "OUTPUT" && "$rule_spec" =~ -d[[:space:]]+127\.0\.0\.1 ) ]]; then
+                            should_delete=1
+                        fi
+                    fi
+                fi
+            fi
+
+            # 检查 FORWARD 规则 (在 filter 表中)
+            if [ "$current_table" == "filter" ] && [[ "$rule_spec" == *"-j ACCEPT"* && "$chain_name" == "FORWARD" ]]; then
+                local s_subnet_val=""
+                local d_subnet_val=""
+                if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                    s_subnet_val="${BASH_REMATCH[1]}"
+                fi
+                if [[ "$rule_spec" =~ -d[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                    d_subnet_val="${BASH_REMATCH[1]}"
+                fi
+
+                if { [ -n "$s_subnet_val" ] && [ -n "${script_subnets[$s_subnet_val]}" ]; } || \
+                   { [ -n "$d_subnet_val" ] && [ -n "${script_subnets[$d_subnet_val]}" ]; }; then
+                    should_delete=1
+                fi
+            fi
+
+            # 检查 MASQUERADE 规则 (在 nat 表中)
+            if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j MASQUERADE"* && "$chain_name" == "POSTROUTING" ]]; then
+                local s_subnet_val=""
+                if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                    s_subnet_val="${BASH_REMATCH[1]}"
+                fi
+                if [ -n "$s_subnet_val" ] && [ -n "${script_subnets[$s_subnet_val]}" ]; then
+                    should_delete=1
+                fi
+            fi
+
+            if [ "$should_delete" -eq 1 ]; then
+                log "INFO" "     - 删除规则 from $current_table/$chain_name: $rule_spec"
+                if ! $SUDO iptables -t "$current_table" -D "$chain_name" $rule_spec >/dev/null 2>&1; then
+                    log "WARNING" "       - 删除规则失败 (可能已不存在或规则稍有不同): $SUDO iptables -t $current_table -D $chain_name $rule_spec"
+                fi
+            fi
+        fi
+    done < <($SUDO iptables-save)
+
+    log "INFO" "   ✅ 旧的iptables规则已清理 (基于现有nsX实例检测)。"
     
     # 3. 杀死所有残留的转发进程
     log "INFO" "   - 步骤3: 停止所有残留的转发进程..."
@@ -190,7 +277,7 @@ cleanup() {
 # 计算MTU值
 calculate_mtu() {
     # 获取默认接口
-    local default_iface=$($SUDO ip route | awk '/default/ {print $5; exit}')
+    local default_iface=$($SUDO ip -o route get 8.8.8.8 2>/dev/null | awk '{print $5}')
     [ -z "$default_iface" ] && { 
         log "WARNING" "无法确定默认网络接口，使用默认MTU 1420"; 
         echo 1420; 
