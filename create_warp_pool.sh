@@ -15,6 +15,9 @@ WARP_LICENSE_KEY=""
 # 自定义WARP端点IP和端口 (可选)
 WARP_ENDPOINT=""
 
+# WARP 实例的独立配置目录
+WARP_CONFIG_BASE_DIR="/var/lib/warp-configs"
+
 # --- 前置检查 ---
 if ! command -v warp-cli &> /dev/null; then
     echo "错误：warp-cli 命令未找到。请确保已正确安装 Cloudflare WARP 客户端。" >&2
@@ -44,15 +47,23 @@ cleanup() {
         fi
     fi
 
-    # 1. 优先清理网络命名空间、内部进程、veth设备和相关配置
-    echo "   - 步骤1: 清理网络命名空间、内部进程、veth设备和DNS配置..."
+    # 1. 优先清理网络命名空间、挂载点、内部进程、veth设备和相关配置
+    echo "   - 步骤1: 清理网络命名空间、挂载点、内部进程、veth设备和DNS配置..."
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         NS_NAME="ns$i"
         VETH_HOST="veth$i"
-        
+        INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/${NS_NAME}"
+        WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
+
         # 检查命名空间是否存在
         if sudo ip netns list | grep -q -w "$NS_NAME"; then
             echo "     - 正在清理命名空间 $NS_NAME..."
+            
+            # 卸载绑定挂载
+            echo "       - 尝试卸载 $NS_NAME 内的绑定挂载..."
+            if sudo ip netns exec "$NS_NAME" mount | grep -q "on ${WARP_SYSTEM_CONFIG_DIR} type"; then
+                sudo ip netns exec "$NS_NAME" umount "$WARP_SYSTEM_CONFIG_DIR" &>/dev/null || true
+            fi
             
             # 强制杀死命名空间内的所有进程
             echo "       - 停止 $NS_NAME 内的所有进程..."
@@ -76,6 +87,12 @@ cleanup() {
         if [ -d "/etc/netns/$NS_NAME" ]; then
             echo "     - 删除DNS配置 /etc/netns/$NS_NAME..."
             sudo rm -rf "/etc/netns/$NS_NAME"
+        fi
+
+        # 清理独立的WARP配置目录
+        if [ -d "$INSTANCE_CONFIG_DIR" ]; then
+            echo "     - 删除独立的WARP配置目录 $INSTANCE_CONFIG_DIR..."
+            sudo rm -rf "$INSTANCE_CONFIG_DIR"
         fi
     done
     echo "   ✅ 网络命名空间、veth设备及相关配置已清理。"
@@ -154,17 +171,27 @@ create_pool() {
             SUBNET="${GATEWAY_IP%.*}.0/24"
 
             # 1. 创建网络命名空间
-            echo "   - 步骤1/7: 创建网络命名空间 ns$i..."
+            echo "   - 步骤1/12: 创建网络命名空间 ns$i..."
             sudo ip netns add "ns$i" || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
             echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
-            # 1.2. 启动命名空间内的loopback接口
-            echo "   - 步骤1.2/7: 启动 ns$i 内的 loopback 接口..."
+            # 2. 创建并绑定独立的配置目录，以隔离每个WARP实例
+            echo "   - 步骤2/12: 为 ns$i 创建并绑定独立配置目录..."
+            INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/ns$i"
+            WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
+            sudo mkdir -p "$INSTANCE_CONFIG_DIR"
+            # 我们需要在该命名空间内创建挂载点并执行绑定挂载
+            sudo ip netns exec "ns$i" mkdir -p "$WARP_SYSTEM_CONFIG_DIR"
+            sudo ip netns exec "ns$i" mount --bind "$INSTANCE_CONFIG_DIR" "$WARP_SYSTEM_CONFIG_DIR"
+            echo "   ✅ 已为 ns$i 绑定独立配置目录: $INSTANCE_CONFIG_DIR"
+
+            # 3. 启动命名空间内的loopback接口
+            echo "   - 步骤3/12: 启动 ns$i 内的 loopback 接口..."
             sudo ip netns exec "ns$i" ip link set lo up || { echo "错误：启动 ns$i 内的 loopback 接口失败。" >&2; exit 1; }
             echo "   ✅ ns$i loopback 接口已启动。"
 
-            # 1.5. 为命名空间配置DNS解析
-            echo "   - 步骤1.5/7: 为 ns$i 配置DNS..."
+            # 4. 为命名空间配置DNS解析
+            echo "   - 步骤4/12: 为 ns$i 配置DNS..."
             sudo mkdir -p "/etc/netns/ns$i"
             cat <<EOF | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
 nameserver 1.1.1.1
@@ -172,38 +199,38 @@ nameserver 8.8.8.8
 EOF
             echo "   ✅ 已配置DNS为 1.1.1.1 和 8.8.8.8。"
 
-            # 2. 创建虚拟以太网设备对
-            echo "   - 步骤2/7: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
+            # 5. 创建虚拟以太网设备对
+            echo "   - 步骤5/12: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
             sudo ip link add "veth$i" type veth peer name "veth${i}-ns" || { echo "错误：创建虚拟以太网设备对失败。" >&2; exit 1; }
             echo "   ✅ 虚拟以太网设备对创建成功。"
 
-            # 3. 配置虚拟以太网设备
-            echo "   - 步骤3/7: 配置虚拟以太网设备..."
+            # 6. 配置虚拟以太网设备
+            echo "   - 步骤6/12: 配置虚拟以太网设备..."
             sudo ip link set "veth${i}-ns" netns "ns$i" || { echo "错误：将 veth${i}-ns 移入 ns$i 失败。" >&2; exit 1; }
             sudo ip netns exec "ns$i" ip addr add "$NAMESPACE_IP/24" dev "veth${i}-ns" || { echo "错误：为 veth${i}-ns@ns$i 分配IP地址失败。" >&2; exit 1; }
             sudo ip addr add "$GATEWAY_IP/24" dev "veth$i" || { echo "错误：为 veth$i 分配IP地址失败。" >&2; exit 1; }
             echo "   ✅ 虚拟以太网设备配置成功。"
 
-            # 4. 启动虚拟以太网设备
-            echo "   - 步骤4/7: 启动虚拟以太网设备..."
+            # 7. 启动虚拟以太网设备
+            echo "   - 步骤7/12: 启动虚拟以太网设备..."
             sudo ip link set "veth$i" up || { echo "错误：启动 veth$i 失败。" >&2; exit 1; }
             sudo ip netns exec "ns$i" ip link set "veth${i}-ns" up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
             # 为命名空间内的veth设备设置MTU，防止因WARP封装导致的数据包过大问题
             sudo ip netns exec "ns$i" ip link set dev "veth${i}-ns" mtu 1420 || { echo "警告：为 veth${i}-ns 设置MTU失败，可能会影响连接稳定性。" >&2; }
             echo "   ✅ 虚拟以太网设备已启动并设置MTU。"
 
-            # 4.5. 禁用反向路径过滤 (解决某些环境下NAT转发问题)
-            echo "   - 步骤4.5/7: 禁用 veth$i 上的反向路径过滤..."
+            # 8. 禁用反向路径过滤 (解决某些环境下NAT转发问题)
+            echo "   - 步骤8/12: 禁用 veth$i 上的反向路径过滤..."
             sudo sysctl -w "net.ipv4.conf.veth$i.rp_filter=0" >/dev/null || { echo "警告：禁用反向路径过滤失败，可能会影响连接。" >&2; }
             echo "   ✅ veth$i 反向路径过滤已禁用。"
 
-            # 5. 设置命名空间内的默认路由
-            echo "   - 步骤5/7: 设置 ns$i 内的默认路由..."
+            # 9. 设置命名空间内的默认路由
+            echo "   - 步骤9/12: 设置 ns$i 内的默认路由..."
             sudo ip netns exec "ns$i" ip route add default via "$GATEWAY_IP" || { echo "错误：在 ns$i 中设置默认路由失败。" >&2; exit 1; }
             echo "   ✅ ns$i 默认路由设置成功。"
 
-            # 6. 配置NAT和转发规则
-            echo "   - 步骤6/7: 配置NAT和转发规则..."
+            # 10. 配置NAT和转发规则
+            echo "   - 步骤10/12: 配置NAT和转发规则..."
             if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -j MASQUERADE &> /dev/null; then
                 sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
             fi
@@ -216,11 +243,12 @@ EOF
             fi
             echo "   ✅ NAT和转发规则配置成功。"
 
-            # 7. 初始化WARP并启动转发
+            # 11. 初始化WARP并启动转发
             WARP_INTERNAL_PORT=40000
             SOCAT_LISTEN_PORT=40001
-            echo "   - 步骤7/7: 在 ns$i 中初始化WARP并启动转发..."
+            echo "   - 步骤11/12: 在 ns$i 中初始化WARP并启动转发..."
             
+            # 在执行命令前，确保挂载命名空间对当前shell可见
             sudo ip netns exec "ns$i" bash -c '
                 set -euo pipefail
                 
@@ -333,9 +361,9 @@ EOF
 
             ' bash "$i" "$WARP_INTERNAL_PORT" "$SOCAT_LISTEN_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP或启动socat失败。" >&2; exit 1; }
 
-            # 8. 创建端口映射
+            # 12. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
-            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:40001..."
+            echo "   - 步骤12/12: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:40001..."
             # 为外部流量和本地流量都创建DNAT规则
             if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; then
                 sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
