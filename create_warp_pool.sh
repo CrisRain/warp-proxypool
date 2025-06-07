@@ -216,7 +216,7 @@ EOF
                 rm -f /run/cloudflare-warp/warp_service || true
 
                 echo "     - 启动WARP服务守护进程..."
-                warp-svc </dev/null >/dev/null 2>&1 &
+                nohup warp-svc >/dev/null 2>&1 &
                 sleep 8
 
                 echo "     - 等待WARP服务IPC Socket就绪..."
@@ -294,9 +294,9 @@ EOF
             SOCAT_LISTEN_PORT=40001
             echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT} 转发到 127.0.0.1:${WARP_INTERNAL_PORT}..."
             
-            # 在后台使用 nsenter 启动 socat，并将所有输入输出重定向到 /dev/null 以实现真正的后台运行
-            ( sudo nsenter --net="/var/run/netns/ns$i" \
-                socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" & ) </dev/null >/dev/null 2>&1
+            # 在后台使用 nsenter 和 nohup 启动 socat，以实现真正的后台运行
+            sudo nsenter --net="/var/run/netns/ns$i" \
+                nohup socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" >/dev/null 2>&1 &
             
             sleep 2 # 等待 socat 启动
             
