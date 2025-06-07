@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # --- 配置参数 ---
-POOL_SIZE=3      # 代理池大小，即创建多少个WARP实例
+POOL_SIZPOOL_SIZE=3      # 代理池大小，即创建多少个WARP实例
 BASE_PORT=10800  # SOCKS5代理的基础端口号
 
 # WARP+ 许可证密钥 (可选)
@@ -61,11 +61,11 @@ cleanup() {
         NAMESPACE_IP="10.0.${SUBNET_THIRD_OCTET}.2"
         
         # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
-        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
+        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; do
+            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
+        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; do
+            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001
         done
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
@@ -313,13 +313,13 @@ EOF
 
             # 8. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
-            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:${SOCAT_LISTEN_PORT}..."
+            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:40001..."
             # 为外部流量和本地流量都创建DNAT规则
-            if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
+            if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; then
+                sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
+            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; then
+                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
             fi
             echo "   ✅ 端口映射创建成功。"
 
@@ -331,18 +331,5 @@ EOF
     echo "====================================================="
     echo "✅✅✅ WARP 代理池创建完成！共 $POOL_SIZE 个实例。"
     echo "每个实例的SOCKS5代理端口从 $BASE_PORT 开始递增。"
-    echo "====================================================="
-}
-
-# --- 主逻辑 ---
-main() {
-    if [ "${1:-}" == "cleanup" ]; then
-        cleanup
-    else
-        cleanup
-        create_pool
-    fi
-}
-
-# 执行主函数
+执行主函数
 main "$@"
