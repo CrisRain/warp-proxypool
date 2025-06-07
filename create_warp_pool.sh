@@ -20,7 +20,10 @@ log() {
     local level=$1
     local message=$2
     local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" | tee -a "$LOG_FILE"
+    # 输出到标准错误 (控制台)
+    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >&2
+    # 同时追加到日志文件
+    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "$LOG_FILE"
 }
 
 # --- 前置检查 ---
@@ -188,11 +191,19 @@ cleanup() {
 calculate_mtu() {
     # 获取默认接口
     local default_iface=$($SUDO ip route | awk '/default/ {print $5; exit}')
-    [ -z "$default_iface" ] && { log "WARNING" "无法确定默认网络接口，使用默认MTU 1420"; echo 1420; return; }
+    [ -z "$default_iface" ] && { 
+        log "WARNING" "无法确定默认网络接口，使用默认MTU 1420"; 
+        echo 1420; 
+        return; 
+    }
     
     # 获取主机接口MTU
     local host_mtu=$($SUDO ip link show "$default_iface" | awk '/mtu/ {print $5; exit}')
-    [ -z "$host_mtu" ] && { log "WARNING" "无法获取接口MTU，使用默认MTU 1420"; echo 1420; return; }
+    [ -z "$host_mtu" ] && { 
+        log "WARNING" "无法获取接口MTU，使用默认MTU 1420"; 
+        echo 1420; 
+        return; 
+    }
     
     # 计算WARP接口MTU (减去WARP封装开销)
     local warp_mtu=$((host_mtu - 80))
@@ -239,7 +250,8 @@ init_warp_instance() {
             local level=$1
             local message=$2
             local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-            printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" | '$SUDO' tee -a "'"$LOG_FILE"'" >/dev/null
+            printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >&2
+            printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "'"$LOG_FILE"'"
         }
         
         # 检查外网连通性
@@ -369,6 +381,7 @@ create_pool() {
     
     # 计算动态MTU值
     local DYNAMIC_MTU=$(calculate_mtu)
+    log "INFO" "计算后的动态MTU值: $DYNAMIC_MTU"
     
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         (
@@ -439,6 +452,7 @@ create_pool() {
             $SUDO ip netns exec "$NS_NAME" ip link set "$VETH_NS" up || \
                 { log "ERROR" "启动 $VETH_NS@$NS_NAME 失败。"; exit 1; }
             
+            # 设置MTU值（确保只传递数字）
             $SUDO ip netns exec "$NS_NAME" ip link set dev "$VETH_NS" mtu "$DYNAMIC_MTU" || \
                 log "WARNING" "为 $VETH_NS 设置MTU失败，可能会影响连接稳定性。"
             
