@@ -17,8 +17,8 @@ cleanup() {
     if command -v systemctl &> /dev/null; then
         if systemctl is-active --quiet warp-svc; then
             echo "   - 停止并禁用 systemd 中的 warp-svc 服务..."
-            sudo systemctl stop warp-svc
-            sudo systemctl disable warp-svc
+            sudo systemctl stop warp-svc >/dev/null 2>&1 || true
+            sudo systemctl disable warp-svc >/dev/null 2>&1 || true
             echo "   ✅ systemd warp-svc 服务已停止并禁用。"
         fi
     fi
@@ -36,25 +36,25 @@ cleanup() {
             # 强制杀死命名空间内的所有进程
             echo "       - 停止 $NS_NAME 内的所有进程..."
             if pids=$(sudo ip netns pids "$NS_NAME" 2>/dev/null); then
-                [ -n "$pids" ] && sudo kill -9 $pids &> /dev/null || true
+                [ -n "$pids" ] && sudo kill -9 $pids >/dev/null 2>&1 || true
             fi
             sleep 1 # 给进程一点时间退出
             
             # 删除命名空间
             echo "       - 删除命名空间 $NS_NAME..."
-            sudo ip netns del "$NS_NAME" &> /dev/null || true
+            sudo ip netns del "$NS_NAME" >/dev/null 2>&1 || true
         fi
         
         # 删除veth设备
         if ip link show "$VETH_HOST" &> /dev/null; then
             echo "     - 删除 veth 设备 $VETH_HOST..."
-            sudo ip link del "$VETH_HOST" &> /dev/null || true
+            sudo ip link del "$VETH_HOST" >/dev/null 2>&1 || true
         fi
 
         # 清理DNS配置文件
         if [ -d "/etc/netns/$NS_NAME" ]; then
             echo "     - 删除DNS配置 /etc/netns/$NS_NAME..."
-            sudo rm -rf "/etc/netns/$NS_NAME"
+            sudo rm -rf "/etc/netns/$NS_NAME" >/dev/null 2>&1 || true
         fi
     done
     echo "   ✅ 网络命名空间、veth设备及相关配置已清理。"
@@ -70,39 +70,39 @@ cleanup() {
         
         # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
         while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
+            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
         done
         while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
+            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
         done
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT
+            sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT >/dev/null 2>&1
         done
         # 清理通用的 MASQUERADE 和 FORWARD 规则
         while sudo iptables -t nat -C POSTROUTING -s $SUBNET -j MASQUERADE &> /dev/null; do
-            sudo iptables -t nat -D POSTROUTING -s $SUBNET -j MASQUERADE
+            sudo iptables -t nat -D POSTROUTING -s $SUBNET -j MASQUERADE >/dev/null 2>&1
         done
         while sudo iptables -C FORWARD -s $SUBNET -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -s $SUBNET -j ACCEPT
+            sudo iptables -D FORWARD -s $SUBNET -j ACCEPT >/dev/null 2>&1
         done
         while sudo iptables -C FORWARD -d $SUBNET -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -d $SUBNET -j ACCEPT
+            sudo iptables -D FORWARD -d $SUBNET -j ACCEPT >/dev/null 2>&1
         done
     done
     echo "   ✅ 旧的iptables规则已清理。"
 
     # 3. 杀死所有可能残留的全局进程作为最后手段
     echo "   - 步骤3: 停止所有残留的 WARP 和转发进程 (全局)..."
-    sudo pkill -9 -f warp-svc || true
-    sudo pkill -9 -f warp-cli || true
-    sudo pkill -9 -f socat || true
+    sudo pkill -9 -f warp-svc >/dev/null 2>&1 || true
+    sudo pkill -9 -f warp-cli >/dev/null 2>&1 || true
+    sudo pkill -9 -f socat >/dev/null 2>&1 || true
     sleep 1
     echo "   ✅ 全局 WARP 和转发进程已清理。"
     
     # 4. 清理锁文件
     echo "   - 步骤4: 清理锁文件..."
-    rm -f /tmp/warp_pool.lock
+    rm -f /tmp/warp_pool.lock >/dev/null 2>&1 || true
     echo "   ✅ 锁文件已清理。"
     
     echo "✅ 彻底清理完成。"
@@ -118,12 +118,12 @@ stop_proxy_manager() {
     if pgrep -f "proxy_manager.py" &> /dev/null; then
         echo "   - 发现正在运行的 proxy_manager.py 进程，正在尝试停止..."
         # 首先尝试正常停止
-        pkill -f "proxy_manager.py"
+        pkill -f "proxy_manager.py" >/dev/null 2>&1 || true
         sleep 2
         # 如果还存在，则强制停止
         if pgrep -f "proxy_manager.py" &> /dev/null; then
             echo "   - 警告：无法通过 pkill 正常停止进程，将使用 kill -9 强制停止。"
-            pkill -9 -f "proxy_manager.py" || true
+            pkill -9 -f "proxy_manager.py" >/dev/null 2>&1 || true
         fi
         echo "   ✅ proxy_manager.py 进程已成功停止。"
     else
