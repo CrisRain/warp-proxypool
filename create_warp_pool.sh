@@ -17,6 +17,8 @@ WARP_ENDPOINT=""
 
 # WARP 实例的独立配置目录
 WARP_CONFIG_BASE_DIR="/var/lib/warp-configs"
+# WARP 实例的独立IPC Socket目录
+WARP_IPC_BASE_DIR="/run/warp-sockets"
 
 # --- 前置检查 ---
 if ! command -v warp-cli &> /dev/null; then
@@ -53,7 +55,9 @@ cleanup() {
         NS_NAME="ns$i"
         VETH_HOST="veth$i"
         INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/${NS_NAME}"
+        INSTANCE_IPC_DIR="${WARP_IPC_BASE_DIR}/${NS_NAME}"
         WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
+        WARP_SYSTEM_IPC_DIR="/run/cloudflare-warp"
 
         # 检查命名空间是否存在
         if sudo ip netns list | grep -q -w "$NS_NAME"; then
@@ -63,6 +67,9 @@ cleanup() {
             echo "       - 尝试卸载 $NS_NAME 内的绑定挂载..."
             if sudo ip netns exec "$NS_NAME" mount | grep -q "on ${WARP_SYSTEM_CONFIG_DIR} type"; then
                 sudo ip netns exec "$NS_NAME" umount "$WARP_SYSTEM_CONFIG_DIR" &>/dev/null || true
+            fi
+            if sudo ip netns exec "$NS_NAME" mount | grep -q "on ${WARP_SYSTEM_IPC_DIR} type"; then
+                sudo ip netns exec "$NS_NAME" umount "$WARP_SYSTEM_IPC_DIR" &>/dev/null || true
             fi
             
             # 强制杀死命名空间内的所有进程
@@ -93,6 +100,11 @@ cleanup() {
         if [ -d "$INSTANCE_CONFIG_DIR" ]; then
             echo "     - 删除独立的WARP配置目录 $INSTANCE_CONFIG_DIR..."
             sudo rm -rf "$INSTANCE_CONFIG_DIR"
+        fi
+        # 清理独立的WARP IPC目录
+        if [ -d "$INSTANCE_IPC_DIR" ]; then
+            echo "     - 删除独立的WARP IPC目录 $INSTANCE_IPC_DIR..."
+            sudo rm -rf "$INSTANCE_IPC_DIR"
         fi
     done
     echo "   ✅ 网络命名空间、veth设备及相关配置已清理。"
@@ -175,15 +187,25 @@ create_pool() {
             sudo ip netns add "ns$i" || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
             echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
-            # 2. 创建并绑定独立的配置目录，以隔离每个WARP实例
-            echo "   - 步骤2/12: 为 ns$i 创建并绑定独立配置目录..."
+            # 2. 创建并绑定独立的配置和IPC目录，以完全隔离每个WARP实例
+            echo "   - 步骤2/12: 为 ns$i 创建并绑定独立配置和IPC目录..."
             INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/ns$i"
+            INSTANCE_IPC_DIR="${WARP_IPC_BASE_DIR}/ns$i"
             WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
+            WARP_SYSTEM_IPC_DIR="/run/cloudflare-warp"
+            
             sudo mkdir -p "$INSTANCE_CONFIG_DIR"
-            # 我们需要在该命名空间内创建挂载点并执行绑定挂载
+            sudo mkdir -p "$INSTANCE_IPC_DIR"
+            
+            # 在命名空间内创建挂载点并执行绑定挂载
             sudo ip netns exec "ns$i" mkdir -p "$WARP_SYSTEM_CONFIG_DIR"
             sudo ip netns exec "ns$i" mount --bind "$INSTANCE_CONFIG_DIR" "$WARP_SYSTEM_CONFIG_DIR"
+            
+            sudo ip netns exec "ns$i" mkdir -p "$WARP_SYSTEM_IPC_DIR"
+            sudo ip netns exec "ns$i" mount --bind "$INSTANCE_IPC_DIR" "$WARP_SYSTEM_IPC_DIR"
+            
             echo "   ✅ 已为 ns$i 绑定独立配置目录: $INSTANCE_CONFIG_DIR"
+            echo "   ✅ 已为 ns$i 绑定独立IPC目录: $INSTANCE_IPC_DIR"
 
             # 3. 启动命名空间内的loopback接口
             echo "   - 步骤3/12: 启动 ns$i 内的 loopback 接口..."
