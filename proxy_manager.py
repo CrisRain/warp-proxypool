@@ -41,7 +41,7 @@ REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 # 注意: 这些配置应与 create_warp_pool.sh 脚本保持一致
 POOL_SIZE = int(os.environ.get('POOL_SIZE', 3))
 BASE_PORT = int(os.environ.get('BASE_PORT', 10800))
-WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
+WARP_INSTANCE_IP = os.environ.get('WARP_HOST_IP', '127.0.0.1') # 从环境变量读取主机IP，默认为127.0.0.1
 IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
 
 # --- 代理状态管理 ---

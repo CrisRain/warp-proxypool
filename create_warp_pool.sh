@@ -59,6 +59,7 @@ cleanup() {
         HOST_PORT=$((BASE_PORT + $i))
         SUBNET_THIRD_OCTET=$i
         NAMESPACE_IP="10.0.${SUBNET_THIRD_OCTET}.2"
+        GATEWAY_IP="10.0.${SUBNET_THIRD_OCTET}.1"
         
         # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
         while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
@@ -67,9 +68,15 @@ cleanup() {
         while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
             sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
+        
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
             sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT
+        done
+        
+        # 清理 SNAT 规则 (解决 127.0.0.1 访问问题)
+        while sudo iptables -t nat -C POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP &> /dev/null; do
+            sudo iptables -t nat -D POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP
         done
     done
     
@@ -132,17 +139,17 @@ create_pool() {
             SUBNET="${GATEWAY_IP%.*}.0/24"
 
             # 1. 创建网络命名空间
-            echo "   - 步骤1/8: 创建网络命名空间 ns$i..."
+            echo "   - 步骤1/7: 创建网络命名空间 ns$i..."
             sudo ip netns add "ns$i" || { echo "错误：创建网络命名空间 ns$i 失败。" >&2; exit 1; }
             echo "   ✅ 网络命名空间 ns$i 创建成功。"
 
             # 1.2. 启动命名空间内的loopback接口
-            echo "   - 步骤1.2/8: 启动 ns$i 内的 loopback 接口..."
+            echo "   - 步骤1.2/7: 启动 ns$i 内的 loopback 接口..."
             sudo ip netns exec "ns$i" ip link set lo up || { echo "错误：启动 ns$i 内的 loopback 接口失败。" >&2; exit 1; }
             echo "   ✅ ns$i loopback 接口已启动。"
 
             # 1.5. 为命名空间配置DNS解析
-            echo "   - 步骤1.5/8: 为 ns$i 配置DNS..."
+            echo "   - 步骤1.5/7: 为 ns$i 配置DNS..."
             sudo mkdir -p "/etc/netns/ns$i"
             cat <<EOF | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
 nameserver 1.1.1.1
@@ -151,19 +158,19 @@ EOF
             echo "   ✅ 已配置DNS为 1.1.1.1 和 8.8.8.8。"
 
             # 2. 创建虚拟以太网设备对
-            echo "   - 步骤2/8: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
+            echo "   - 步骤2/7: 创建虚拟以太网设备 veth$i <--> veth${i}-ns..."
             sudo ip link add "veth$i" type veth peer name "veth${i}-ns" || { echo "错误：创建虚拟以太网设备对失败。" >&2; exit 1; }
             echo "   ✅ 虚拟以太网设备对创建成功。"
 
             # 3. 配置虚拟以太网设备
-            echo "   - 步骤3/8: 配置虚拟以太网设备..."
+            echo "   - 步骤3/7: 配置虚拟以太网设备..."
             sudo ip link set "veth${i}-ns" netns "ns$i" || { echo "错误：将 veth${i}-ns 移入 ns$i 失败。" >&2; exit 1; }
             sudo ip netns exec "ns$i" ip addr add "$NAMESPACE_IP/24" dev "veth${i}-ns" || { echo "错误：为 veth${i}-ns@ns$i 分配IP地址失败。" >&2; exit 1; }
             sudo ip addr add "$GATEWAY_IP/24" dev "veth$i" || { echo "错误：为 veth$i 分配IP地址失败。" >&2; exit 1; }
             echo "   ✅ 虚拟以太网设备配置成功。"
 
             # 4. 启动虚拟以太网设备
-            echo "   - 步骤4/8: 启动虚拟以太网设备..."
+            echo "   - 步骤4/7: 启动虚拟以太网设备..."
             sudo ip link set "veth$i" up || { echo "错误：启动 veth$i 失败。" >&2; exit 1; }
             sudo ip netns exec "ns$i" ip link set "veth${i}-ns" up || { echo "错误：启动 veth${i}-ns@ns$i 失败。" >&2; exit 1; }
             # 为命名空间内的veth设备设置MTU，防止因WARP封装导致的数据包过大问题
@@ -171,17 +178,17 @@ EOF
             echo "   ✅ 虚拟以太网设备已启动并设置MTU。"
 
             # 4.5. 禁用反向路径过滤 (解决某些环境下NAT转发问题)
-            echo "   - 步骤4.5/8: 禁用 veth$i 上的反向路径过滤..."
+            echo "   - 步骤4.5/7: 禁用 veth$i 上的反向路径过滤..."
             sudo sysctl -w "net.ipv4.conf.veth$i.rp_filter=0" >/dev/null || { echo "警告：禁用反向路径过滤失败，可能会影响连接。" >&2; }
             echo "   ✅ veth$i 反向路径过滤已禁用。"
 
             # 5. 设置命名空间内的默认路由
-            echo "   - 步骤5/8: 设置 ns$i 内的默认路由..."
+            echo "   - 步骤5/7: 设置 ns$i 内的默认路由..."
             sudo ip netns exec "ns$i" ip route add default via "$GATEWAY_IP" || { echo "错误：在 ns$i 中设置默认路由失败。" >&2; exit 1; }
             echo "   ✅ ns$i 默认路由设置成功。"
 
             # 6. 配置NAT和转发规则
-            echo "   - 步骤6/8: 配置NAT和转发规则..."
+            echo "   - 步骤6/7: 配置NAT和转发规则..."
             if ! sudo iptables -t nat -C POSTROUTING -s "$SUBNET" -j MASQUERADE &> /dev/null; then
                 sudo iptables -t nat -I POSTROUTING -s "$SUBNET" -j MASQUERADE || { echo "错误：配置NAT规则失败。" >&2; exit 1; }
             fi
@@ -194,9 +201,10 @@ EOF
             fi
             echo "   ✅ NAT和转发规则配置成功。"
 
-            # 7. 初始化WARP
+            # 7. 初始化WARP并启动转发
             WARP_INTERNAL_PORT=40000
-            echo "   - 步骤7/8: 在 ns$i 中初始化WARP (内部SOCKS5端口: $WARP_INTERNAL_PORT)..."
+            SOCAT_LISTEN_PORT=40001
+            echo "   - 步骤7/7: 在 ns$i 中初始化WARP并启动转发..."
             
             sudo ip netns exec "ns$i" bash -c '
                 set -euo pipefail
@@ -204,8 +212,9 @@ EOF
                 # 从参数中获取变量
                 i="$1"
                 WARP_INTERNAL_PORT_TO_SET="$2"
-                WARP_LICENSE_KEY="$3"
-                WARP_ENDPOINT="$4"
+                SOCAT_LISTEN_PORT_TO_SET="$3"
+                WARP_LICENSE_KEY="$4"
+                WARP_ENDPOINT="$5"
                 
                 # 关闭继承的锁文件描述符，防止子进程持有锁
                 exec 200>&-
@@ -265,7 +274,7 @@ EOF
                 warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
                 
                 if [ -n "$WARP_INTERNAL_PORT_TO_SET" ]; then
-                    echo "     - 设置自定义SOCKS5代理端口: $WARP_INTERNAL_PORT_TO_SET..."
+                    echo "     - 设置WARP SOCKS5代理端口: $WARP_INTERNAL_PORT_TO_SET..."
                     warp-cli --accept-tos proxy port "$WARP_INTERNAL_PORT_TO_SET" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
                 fi
                 
@@ -297,27 +306,17 @@ EOF
                     sleep 3
                 done
                 echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
-            ' bash "$i" "$WARP_INTERNAL_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
-            # 7.5. 使用 socat 将流量转发到 WARP
-            SOCAT_LISTEN_PORT=40001
-            echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT} 转发到 127.0.0.1:${WARP_INTERNAL_PORT}..."
-            
-            # 在后台使用 nsenter 和 nohup 启动 socat，并关闭文件描述符以避免持有锁
-            (
-                exec 200>&- # 确保子进程不继承锁文件描述符
-                sudo nsenter --net="/var/run/netns/ns$i" \
-                    nohup socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" >/dev/null 2>&1 &
-            )
-            
-            sleep 2 # 等待 socat 启动
-            
-            # 检查 socat 进程是否在运行
-            if ! sudo nsenter --net="/var/run/netns/ns$i" pgrep -f "socat TCP4-LISTEN:${SOCAT_LISTEN_PORT}" > /dev/null; then
-                echo "错误：在 ns$i 中启动 socat 失败。" >&2
-                exit 1
-            fi
-            echo "   ✅ socat 在 ns$i 中已成功启动。"
+                echo "     - 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT_TO_SET} 转发到 127.0.0.1:${WARP_INTERNAL_PORT_TO_SET}..."
+                nohup socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT_TO_SET",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT_TO_SET" >/dev/null 2>&1 &
+                sleep 2
+                if ! pgrep -f "socat TCP4-LISTEN:${SOCAT_LISTEN_PORT_TO_SET}" > /dev/null; then
+                    echo "错误：在 ns$i 中启动 socat 失败。" >&2
+                    exit 1
+                fi
+                echo "   ✅ socat 在 ns$i 中已成功启动。"
+
+            ' bash "$i" "$WARP_INTERNAL_PORT" "$SOCAT_LISTEN_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP或启动socat失败。" >&2; exit 1; }
 
             # 8. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
@@ -329,11 +328,14 @@ EOF
             if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
                 sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
             fi
-            # 此处的特定端口转发规则不再需要，因为已被上面更通用的 -d $SUBNET 规则覆盖
-            # if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; then
-            #     sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
-            # fi
             echo "   ✅ 端口映射创建成功。"
+            
+            # 9. 添加SNAT规则解决127.0.0.1访问问题
+            echo "   - 步骤9/9: 添加SNAT规则解决本地回环访问问题..."
+            if ! sudo iptables -t nat -C POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP &> /dev/null; then
+                sudo iptables -t nat -I POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP || { echo "错误：添加SNAT规则失败。" >&2; exit 1; }
+            fi
+            echo "   ✅ SNAT规则添加成功。"
 
             echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT"
             
