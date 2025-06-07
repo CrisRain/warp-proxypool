@@ -15,6 +15,8 @@ services:
       - ./proxy_manager.log:/app/proxy_manager.log # 挂载日志文件 (可选)
     extra_hosts:
       - "host.docker.internal:host-gateway" # 确保容器内能通过 host.docker.internal 访问宿主机
+    entrypoint: ["/app/docker_entrypoint.sh"]
+    command: ["python3", "proxy_manager.py"]
     # 如果需要确保 WARP 配置文件持久化或从外部提供，可以考虑挂载 /var/lib/cloudflare-warp
     # volumes:
     #   - ./proxy_manager.log:/app/proxy_manager.log

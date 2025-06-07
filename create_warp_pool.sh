@@ -342,7 +342,11 @@ EOF
 
             # 9. 创建本地流量转发 (socat)
             echo "   - 步骤9/9: 创建本地流量的端口转发 (socat)..."
-            nohup sudo socat TCP4-LISTEN:"$HOST_PORT",bind=127.0.0.1,fork,reuseaddr TCP4:"$NAMESPACE_IP":"$SOCAT_LISTEN_PORT" >/dev/null 2>&1 &
+            # 启动宿主机 socat 前，同样需要关闭继承的锁文件描述符
+            (
+                exec 200>&-
+                nohup sudo socat TCP4-LISTEN:"$HOST_PORT",bind=127.0.0.1,fork,reuseaddr TCP4:"$NAMESPACE_IP":"$SOCAT_LISTEN_PORT" >/dev/null 2>&1 &
+            )
             sleep 1
             if ! pgrep -f "socat TCP4-LISTEN:${HOST_PORT},bind=127.0.0.1" > /dev/null; then
                 echo "错误：在宿主机上为 127.0.0.1:${HOST_PORT} 启动 socat 失败。" >&2

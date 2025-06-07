@@ -112,7 +112,10 @@ echo "   - 启动代理管理API服务 (${PROXY_MANAGER_SCRIPT})..."
 echo "     日志将输出到: ${LOG_FILE}"
 # 使用虚拟环境中的python执行脚本
 # 使用 nohup 和 & 实现后台运行，并将标准输出和标准错误重定向到日志文件
-nohup "$VENV_PYTHON" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
+# 动态设置 WARP_HOST_IP 环境变量，以最可靠的方式连接到宿主机上的代理端口
+# 这会获取主机的主要IP地址，并将其传递给Python脚本，以绕过127.0.0.1连接的复杂性
+WARP_HOST_IP=$(hostname -I | awk '{print $1}')
+nohup env WARP_HOST_IP="$WARP_HOST_IP" "$VENV_PYTHON" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
 # 检查nohup命令是否成功启动进程 (注意：这只检查nohup本身，不检查python脚本是否正常运行)
 if [ $? -ne 0 ]; then
     echo "错误：启动代理管理API (${PROXY_MANAGER_SCRIPT}) 失败。请检查 ${LOG_FILE} 获取详细信息。" >&2
