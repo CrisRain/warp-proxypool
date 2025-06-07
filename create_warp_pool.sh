@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # --- 配置参数 ---
-POOL_SIZE=3                 # 代理池大小
+POOL_SIZE=1                 # 代理池大小 (调试模式：只创建一个)
 BASE_PORT=10800             # WARP实例在各自命名空间中监听的SOCKS5基础端口
 MANAGER_NS="ns_manager"     # 管理器所在的命名空间
 MANAGER_IP="10.255.255.254" # 管理器的IP地址
@@ -122,76 +122,70 @@ create_pool() {
     echo "-----------------------------------------------------"
     echo "🚀 步骤2: 循环创建 $POOL_SIZE 个独立的WARP实例..."
     echo "-----------------------------------------------------"
-    for i in $(seq 0 $(($POOL_SIZE-1))); do
-        (
-            flock -x 200
-            
-            WARP_NS="ns$i"
-            WARP_CONFIG_DIR="/var/lib/cloudflare-warp-$WARP_NS"
-            VETH_WARP="veth-w$i"
-            VETH_MANAGER="veth-m$i"
-            WARP_IP="10.0.$i.2"
-            MANAGER_GW_IP="10.0.$i.1"
-            WARP_SOCKS_PORT=$((BASE_PORT + i))
+    # --- 调试模式：只创建一个实例 ---
+    i=0
+    WARP_NS="ns$i"
+    WARP_CONFIG_DIR="/var/lib/cloudflare-warp-$WARP_NS"
+    VETH_WARP="veth-w$i"
+    VETH_MANAGER="veth-m$i"
+    WARP_IP="10.0.$i.2"
+    MANAGER_GW_IP="10.0.$i.1"
+    WARP_SOCKS_PORT=$((BASE_PORT + i))
 
-            echo "✨ 正在创建 WARP 实例 $i (命名空间: $WARP_NS)..."
+    echo "✨ 正在创建 WARP 实例 $i (命名空间: $WARP_NS)..."
 
-            # 1. 创建WARP网络命名空间
-            sudo ip netns add "$WARP_NS"
-            sudo ip netns exec "$WARP_NS" ip link set lo up
-            sudo mkdir -p "/etc/netns/$WARP_NS"
-            echo "nameserver 1.1.1.1" | sudo tee "/etc/netns/$WARP_NS/resolv.conf" > /dev/null
+    # 1. 创建WARP网络命名空间
+    sudo ip netns add "$WARP_NS"
+    sudo ip netns exec "$WARP_NS" ip link set lo up
+    sudo mkdir -p "/etc/netns/$WARP_NS"
+    echo "nameserver 1.1.1.1" | sudo tee "/etc/netns/$WARP_NS/resolv.conf" > /dev/null
 
-            # 2. 创建veth对，连接WARP命名空间和管理器命名空间
-            sudo ip link add "$VETH_WARP" type veth peer name "$VETH_MANAGER"
-            sudo ip link set "$VETH_WARP" netns "$WARP_NS"
-            sudo ip link set "$VETH_MANAGER" netns "$MANAGER_NS"
-            sudo ip netns exec "$WARP_NS" ip addr add "$WARP_IP/24" dev "$VETH_WARP"
-            sudo ip netns exec "$MANAGER_NS" ip addr add "$MANAGER_GW_IP/24" dev "$VETH_MANAGER"
-            sudo ip netns exec "$WARP_NS" ip link set "$VETH_WARP" up
-            sudo ip netns exec "$MANAGER_NS" ip link set "$VETH_MANAGER" up
-            sudo ip netns exec "$WARP_NS" ip route add default via "$MANAGER_GW_IP"
+    # 2. 创建veth对，连接WARP命名空间和管理器命名空间
+    sudo ip link add "$VETH_WARP" type veth peer name "$VETH_MANAGER"
+    sudo ip link set "$VETH_WARP" netns "$WARP_NS"
+    sudo ip link set "$VETH_MANAGER" netns "$MANAGER_NS"
+    sudo ip netns exec "$WARP_NS" ip addr add "$WARP_IP/24" dev "$VETH_WARP"
+    sudo ip netns exec "$MANAGER_NS" ip addr add "$MANAGER_GW_IP/24" dev "$VETH_MANAGER"
+    sudo ip netns exec "$WARP_NS" ip link set "$VETH_WARP" up
+    sudo ip netns exec "$MANAGER_NS" ip link set "$VETH_MANAGER" up
+    sudo ip netns exec "$WARP_NS" ip route add default via "$MANAGER_GW_IP"
 
-            # 3. 初始化WARP
-            sudo mkdir -p "$WARP_CONFIG_DIR"
-            sudo chmod 700 "$WARP_CONFIG_DIR"
-            
-            sudo ip netns exec "$WARP_NS" bash -c '
-                set -euo pipefail
-                exec 200>&- # 关闭继承的锁
+    # 3. 初始化WARP
+    sudo mkdir -p "$WARP_CONFIG_DIR"
+    sudo chmod 700 "$WARP_CONFIG_DIR"
+    
+    sudo ip netns exec "$WARP_NS" bash -c '
+        set -euo pipefail
 
-                WARP_SOCKS_PORT_TO_SET="$1"
-                HOST_WARP_CONFIG_DIR="$2"
+        WARP_SOCKS_PORT_TO_SET="$1"
+        HOST_WARP_CONFIG_DIR="$2"
 
-                mkdir -p /var/lib/cloudflare-warp
-                mount --bind "$HOST_WARP_CONFIG_DIR" /var/lib/cloudflare-warp
-                
-                nohup warp-svc >/dev/null 2>&1 &
-                
-                echo "     - 等待 WARP daemon (warp-svc) 完全就绪..."
-                _MAX_SVC_WAIT_ATTEMPTS=20
-                _SVC_WAIT_COUNT=0
-                until warp-cli --accept-tos status &>/dev/null; do
-                    _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
-                    if [ $_SVC_WAIT_COUNT -gt $_MAX_SVC_WAIT_ATTEMPTS ]; then
-                        echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
-                        exit 1
-                    fi
-                    echo "       (尝试 $_SVC_WAIT_COUNT/$_MAX_SVC_WAIT_ATTEMPTS) 等待中..."
-                    sleep 2
-                done
-                echo "   ✅ WARP daemon 已就绪。"
+        mkdir -p /var/lib/cloudflare-warp
+        mount --bind "$HOST_WARP_CONFIG_DIR" /var/lib/cloudflare-warp
+        
+        nohup warp-svc >/dev/null 2>&1 &
+        
+        echo "     - 等待 WARP daemon (warp-svc) 完全就绪..."
+        _MAX_SVC_WAIT_ATTEMPTS=20
+        _SVC_WAIT_COUNT=0
+        until warp-cli --accept-tos status &>/dev/null; do
+            _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
+            if [ $_SVC_WAIT_COUNT -gt $_MAX_SVC_WAIT_ATTEMPTS ]; then
+                echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
+                exit 1
+            fi
+            echo "       (尝试 $_SVC_WAIT_COUNT/$_MAX_SVC_WAIT_ATTEMPTS) 等待中..."
+            sleep 2
+        done
+        echo "   ✅ WARP daemon 已就绪。"
 
-                warp-cli --accept-tos registration new
-                warp-cli --accept-tos mode proxy
-                warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT_TO_SET"
-                warp-cli --accept-tos connect
-            ' bash "$WARP_SOCKS_PORT" "$WARP_CONFIG_DIR"
+        warp-cli --accept-tos registration new
+        warp-cli --accept-tos mode proxy
+        warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT_TO_SET"
+        warp-cli --accept-tos connect
+    ' bash "$WARP_SOCKS_PORT" "$WARP_CONFIG_DIR"
 
-            echo "✅ WARP 实例 $i 创建成功。"
-
-        ) 200>/tmp/warp_pool.lock
-    done
+    echo "✅ WARP 实例 $i 创建成功。"
 
     echo "====================================================="
     echo "✅✅✅ 网络环境创建完成！共 $POOL_SIZE 个WARP实例。"
