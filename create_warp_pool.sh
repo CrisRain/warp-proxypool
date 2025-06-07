@@ -167,10 +167,21 @@ create_pool() {
                 mount --bind "$HOST_WARP_CONFIG_DIR" /var/lib/cloudflare-warp
                 
                 nohup warp-svc >/dev/null 2>&1 &
-                sleep 8
                 
-                while ! test -S /run/cloudflare-warp/warp_service; do sleep 1; done
-                
+                echo "     - 等待 WARP daemon (warp-svc) 完全就绪..."
+                _MAX_SVC_WAIT_ATTEMPTS=20
+                _SVC_WAIT_COUNT=0
+                until warp-cli --accept-tos status &>/dev/null; do
+                    _SVC_WAIT_COUNT=$(($_SVC_WAIT_COUNT + 1))
+                    if [ $_SVC_WAIT_COUNT -gt $_MAX_SVC_WAIT_ATTEMPTS ]; then
+                        echo "错误：等待WARP服务 (warp-svc) 超时。" >&2
+                        exit 1
+                    fi
+                    echo "       (尝试 $_SVC_WAIT_COUNT/$_MAX_SVC_WAIT_ATTEMPTS) 等待中..."
+                    sleep 2
+                done
+                echo "   ✅ WARP daemon 已就绪。"
+
                 warp-cli --accept-tos registration new
                 warp-cli --accept-tos mode proxy
                 warp-cli --accept-tos proxy port "$WARP_SOCKS_PORT_TO_SET"
