@@ -32,7 +32,7 @@ echo "✅ root权限检查通过。"
 
 # 清理函数
 cleanup() {
-    echo "🧹 开始清理旧的网络配置 (如果存在)..."
+    echo "🧹 开始进行彻底清理，确保环境干净..."
     
     # 停止并禁用 systemd 服务 (如果存在)
     if command -v systemctl &> /dev/null; then
@@ -44,42 +44,66 @@ cleanup() {
         fi
     fi
 
-    # 杀死所有残留的 warp-svc 和 warp-cli 进程
-    echo "   - 停止所有残留的 WARP 和转发进程..."
-    sudo pkill -f warp-svc || true
-    sudo pkill -f warp-cli || true
-    sudo pkill -f socat || true
-    sleep 2 # 等待进程完全退出
-    echo "   ✅ WARP 和转发进程已清理。"
+    # 1. 优先清理网络命名空间、内部进程、veth设备和相关配置
+    echo "   - 步骤1: 清理网络命名空间、内部进程、veth设备和DNS配置..."
+    for i in $(seq 0 $(($POOL_SIZE-1))); do
+        NS_NAME="ns$i"
+        VETH_HOST="veth$i"
+        
+        # 检查命名空间是否存在
+        if sudo ip netns list | grep -q -w "$NS_NAME"; then
+            echo "     - 正在清理命名空间 $NS_NAME..."
+            
+            # 强制杀死命名空间内的所有进程
+            echo "       - 停止 $NS_NAME 内的所有进程..."
+            if pids=$(sudo ip netns pids "$NS_NAME" 2>/dev/null); then
+                [ -n "$pids" ] && sudo kill -9 $pids &> /dev/null || true
+            fi
+            sleep 1 # 给进程一点时间退出
+            
+            # 删除命名空间
+            echo "       - 删除命名空间 $NS_NAME..."
+            sudo ip netns del "$NS_NAME" &> /dev/null || true
+        fi
+        
+        # 删除veth设备
+        if ip link show "$VETH_HOST" &> /dev/null; then
+            echo "     - 删除 veth 设备 $VETH_HOST..."
+            sudo ip link del "$VETH_HOST" &> /dev/null || true
+        fi
 
-    # 清理 iptables 规则
-    echo "   - 清理iptables规则..."
+        # 清理DNS配置文件
+        if [ -d "/etc/netns/$NS_NAME" ]; then
+            echo "     - 删除DNS配置 /etc/netns/$NS_NAME..."
+            sudo rm -rf "/etc/netns/$NS_NAME"
+        fi
+    done
+    echo "   ✅ 网络命名空间、veth设备及相关配置已清理。"
+
+    # 2. 清理 iptables 规则
+    echo "   - 步骤2: 清理iptables规则..."
     SOCAT_LISTEN_PORT=40001 # socat 监听的端口
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         HOST_PORT=$((BASE_PORT + $i))
         SUBNET_THIRD_OCTET=$i
         NAMESPACE_IP="10.0.${SUBNET_THIRD_OCTET}.2"
+        SUBNET="10.0.$i.0/24"
         
         # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
-        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; do
-            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001
+        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
+            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001 &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:40001
+        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
+            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
             sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT
         done
-    done
-    
-    # 清理通用的 MASQUERADE 和 FORWARD 规则
-    for i in $(seq 0 $(($POOL_SIZE-1))); do
-        SUBNET="10.0.$i.0/24"
+        # 清理通用的 MASQUERADE 和 FORWARD 规则
         while sudo iptables -t nat -C POSTROUTING -s $SUBNET -j MASQUERADE &> /dev/null; do
             sudo iptables -t nat -D POSTROUTING -s $SUBNET -j MASQUERADE
         done
-        # 清理简化的双向转发规则
         while sudo iptables -C FORWARD -s $SUBNET -j ACCEPT &> /dev/null; do
             sudo iptables -D FORWARD -s $SUBNET -j ACCEPT
         done
@@ -89,22 +113,20 @@ cleanup() {
     done
     echo "   ✅ 旧的iptables规则已清理。"
 
-    # 清理网络命名空间和veth设备
-    echo "   - 清理网络命名空间和veth设备..."
-    for i in $(seq 0 $(($POOL_SIZE-1))); do
-        if sudo ip netns list | grep -q "ns$i"; then
-            sudo ip netns del "ns$i" &> /dev/null || true
-        fi
-        if ip link show "veth$i" &> /dev/null; then
-            sudo ip link del "veth$i" &> /dev/null || true
-        fi
-    done
-    echo "   ✅ 旧的网络命名空间和veth设备已清理。"
+    # 3. 杀死所有可能残留的全局进程作为最后手段
+    echo "   - 步骤3: 停止所有残留的 WARP 和转发进程 (全局)..."
+    sudo pkill -9 -f warp-svc || true
+    sudo pkill -9 -f warp-cli || true
+    sudo pkill -9 -f socat || true
+    sleep 1
+    echo "   ✅ 全局 WARP 和转发进程已清理。"
     
-    # 清理锁文件
+    # 4. 清理锁文件
+    echo "   - 步骤4: 清理锁文件..."
     rm -f /tmp/warp_pool.lock
+    echo "   ✅ 锁文件已清理。"
     
-    echo "✅ 旧的网络配置清理完成。"
+    echo "✅ 彻底清理完成。"
 }
 
 # 创建函数
