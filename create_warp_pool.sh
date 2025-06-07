@@ -65,18 +65,9 @@ cleanup() {
         while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
             sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
-        done
-        
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
             sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT
-        done
-        
-        # 清理 SNAT 规则 (解决 127.0.0.1 访问问题)
-        while sudo iptables -t nat -C POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP &> /dev/null; do
-            sudo iptables -t nat -D POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP
         done
     done
     
@@ -100,13 +91,21 @@ cleanup() {
     echo "   - 清理网络命名空间和veth设备..."
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         if sudo ip netns list | grep -q "ns$i"; then
+            # 卸载独立的WARP配置目录
+            if mount | grep -q "/var/lib/cloudflare-warp-ns$i"; then
+                sudo umount "/var/lib/cloudflare-warp-ns$i" &> /dev/null || true
+            fi
             sudo ip netns del "ns$i" &> /dev/null || true
         fi
         if ip link show "veth$i" &> /dev/null; then
             sudo ip link del "veth$i" &> /dev/null || true
         fi
+        # 清理独立的WARP配置目录
+        if [ -d "/var/lib/cloudflare-warp-ns$i" ]; then
+            sudo rm -rf "/var/lib/cloudflare-warp-ns$i"
+        fi
     done
-    echo "   ✅ 旧的网络命名空间和veth设备已清理。"
+    echo "   ✅ 旧的网络命名空间、veth设备和WARP配置已清理。"
     
     # 清理锁文件
     rm -f /tmp/warp_pool.lock
@@ -206,6 +205,13 @@ EOF
             SOCAT_LISTEN_PORT=40001
             echo "   - 步骤7/7: 在 ns$i 中初始化WARP并启动转发..."
             
+            # 为此实例创建独立的WARP配置目录
+            WARP_CONFIG_DIR="/var/lib/cloudflare-warp-ns$i"
+            echo "   - 步骤7.1/9: 创建并设置独立的WARP配置目录 $WARP_CONFIG_DIR..."
+            sudo mkdir -p "$WARP_CONFIG_DIR"
+            sudo chmod 700 "$WARP_CONFIG_DIR"
+            echo "   ✅ 独立配置目录已创建。"
+
             sudo ip netns exec "ns$i" bash -c '
                 set -euo pipefail
                 
@@ -215,9 +221,17 @@ EOF
                 SOCAT_LISTEN_PORT_TO_SET="$3"
                 WARP_LICENSE_KEY="$4"
                 WARP_ENDPOINT="$5"
+                HOST_WARP_CONFIG_DIR="$6"
                 
                 # 关闭继承的锁文件描述符，防止子进程持有锁
                 exec 200>&-
+
+                echo "     - 隔离WARP配置..."
+                # 在命名空间内创建挂载点
+                mkdir -p /var/lib/cloudflare-warp
+                # 使用bind mount将宿主机上的独立配置目录挂载到命名空间内
+                mount --bind "$HOST_WARP_CONFIG_DIR" /var/lib/cloudflare-warp
+                echo "   ✅ WARP配置已隔离。"
 
                 # 检查外网连通性
                 echo "     - 检查外网连通性..."
@@ -316,26 +330,25 @@ EOF
                 fi
                 echo "   ✅ socat 在 ns$i 中已成功启动。"
 
-            ' bash "$i" "$WARP_INTERNAL_PORT" "$SOCAT_LISTEN_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP或启动socat失败。" >&2; exit 1; }
+            ' bash "$i" "$WARP_INTERNAL_PORT" "$SOCAT_LISTEN_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" "$WARP_CONFIG_DIR" || { echo "错误：在 ns$i 中初始化WARP或启动socat失败。" >&2; exit 1; }
 
-            # 8. 创建端口映射
+            # 8. 创建端口映射 (外部流量)
             HOST_PORT=$((BASE_PORT + $i))
-            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:${SOCAT_LISTEN_PORT}..."
-            # 为外部流量和本地流量都创建DNAT规则
+            echo "   - 步骤8/9: 创建外部流量的端口映射 (iptables PREROUTING)..."
             if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
                 sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
+            echo "   ✅ 外部流量端口映射创建成功。"
+
+            # 9. 创建本地流量转发 (socat)
+            echo "   - 步骤9/9: 创建本地流量的端口转发 (socat)..."
+            nohup sudo socat TCP4-LISTEN:"$HOST_PORT",bind=127.0.0.1,fork,reuseaddr TCP4:"$NAMESPACE_IP":"$SOCAT_LISTEN_PORT" >/dev/null 2>&1 &
+            sleep 1
+            if ! pgrep -f "socat TCP4-LISTEN:${HOST_PORT},bind=127.0.0.1" > /dev/null; then
+                echo "错误：在宿主机上为 127.0.0.1:${HOST_PORT} 启动 socat 失败。" >&2
+                exit 1
             fi
-            echo "   ✅ 端口映射创建成功。"
-            
-            # 9. 添加SNAT规则解决127.0.0.1访问问题
-            echo "   - 步骤9/9: 添加SNAT规则解决本地回环访问问题..."
-            if ! sudo iptables -t nat -C POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP &> /dev/null; then
-                sudo iptables -t nat -I POSTROUTING -s 127.0.0.1 -d $NAMESPACE_IP -p tcp --dport $SOCAT_LISTEN_PORT -j SNAT --to-source $GATEWAY_IP || { echo "错误：添加SNAT规则失败。" >&2; exit 1; }
-            fi
-            echo "   ✅ SNAT规则添加成功。"
+            echo "   ✅ 本地流量转发 (127.0.0.1:${HOST_PORT}) 已启动。"
 
             echo "🎉 WARP 实例 $i 创建成功，SOCKS5代理监听在主机端口: $HOST_PORT"
             
