@@ -51,6 +51,7 @@ cleanup() {
     echo "   - 停止所有残留的 WARP 进程..."
     sudo pkill -f warp-svc || true
     sudo pkill -f warp-cli || true
+    sudo pkill -f danted || true
     sleep 2 # 等待进程完全退出
     echo "   ✅ WARP 进程已清理。"
 
@@ -295,6 +296,48 @@ EOF
                 done
                 echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
             ' bash "$i" "$CUSTOM_PROXY_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
+
+            # 7.5. 配置并启动 Dante SOCKS5 服务器以转发流量
+            echo "   - 步骤7.5/8: 配置并启动 Dante SOCKS 服务器以转发流量..."
+            DANTED_CONF_PATH="/etc/netns/ns$i/danted.conf"
+            # Dante 将监听在 $SOCKS_PORT_IN_NAMESPACE，并将流量转发到 WARP 的内部端口
+            WARP_INTERNAL_PORT=40000
+
+            # 创建 danted.conf
+            # Dante 监听在命名空间内的所有接口上，并将流量转发到只监听在回环地址的 WARP
+            cat <<EOF | sudo tee "$DANTED_CONF_PATH" > /dev/null
+logoutput: syslog
+internal: 0.0.0.0 port = ${SOCKS_PORT_IN_NAMESPACE}
+external: veth${i}-ns
+
+socksmethod: none
+user.privileged: root
+user.unprivileged: nobody
+
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: error connect
+}
+
+socks pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    proxyprotocol: socks_v5
+    proxy: 127.0.0.1 port = ${WARP_INTERNAL_PORT}
+    log: error connect
+}
+EOF
+            echo "   ✅ Dante配置文件已创建于 ${DANTED_CONF_PATH}"
+
+            # 在后台启动 danted
+            sudo ip netns exec "ns$i" danted -f "$DANTED_CONF_PATH" -D
+            sleep 1 # 等待 danted 启动
+            if ! sudo ip netns exec "ns$i" pgrep danted > /dev/null; then
+                echo "错误：在 ns$i 中启动 danted 服务器失败。请检查日志。" >&2
+                # 在前台运行以进行调试
+                sudo ip netns exec "ns$i" danted -f "$DANTED_CONF_PATH"
+                exit 1
+            fi
+            echo "   ✅ Dante SOCKS 服务器在 ns$i 中已启动。"
 
             # 8. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
