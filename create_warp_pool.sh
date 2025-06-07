@@ -110,7 +110,9 @@ cleanup() {
 create_pool() {
     echo "🚀 开始启用IP转发..."
     sudo sysctl -w net.ipv4.ip_forward=1 || { echo "错误：启用IP转发失败。" >&2; exit 1; }
-    echo "✅ IP转发已启用。"
+    # 允许将发往127.0.0.1的流量进行路由，这是让iptables OUTPUT链规则对localhost生效的关键
+    sudo sysctl -w net.ipv4.conf.lo.route_localnet=1 || { echo "警告：设置 route_localnet 失败，直接访问127.0.0.1的端口可能不工作。" >&2; }
+    echo "✅ IP转发和本地网络路由已启用。"
 
     echo "🚀 开始创建 WARP 代理池..."
     for i in $(seq 0 $(($POOL_SIZE-1))); do
