@@ -369,25 +369,11 @@ create_pool() {
                 done
                 printf "   ✅ WARP在 ns%s 中已成功初始化并连接。\n" "$1"
 
-                printf "     - 执行断线重连以强制刷新IP...\n"
-                warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+                printf "     - 使用 endpoint reset 刷新IP...\n"
+                warp-cli --accept-tos tunnel endpoint reset >/dev/null 2>&1 || { printf "错误：使用 endpoint reset 刷新IP失败。\n" >&2; exit 1; }
+                # 等待命令生效
                 sleep 3
-                warp-cli --accept-tos connect >/dev/null 2>&1 || { printf "错误：断线重连后再次连接WARP失败。\n" >&2; exit 1; }
-                
-                printf "     - 等待重连成功...\n"
-                MAX_CONNECT_WAIT_ATTEMPTS=30
-                CONNECT_WAIT_COUNT=0
-                while ! warp-cli --accept-tos status | grep -E -q "Status( update)?:[[:space:]]*Connected"; do
-                    CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
-                    if [ $CONNECT_WAIT_COUNT -gt $MAX_CONNECT_WAIT_ATTEMPTS ]; then
-                        printf "错误：断线重连后状态检查失败 (超时)。\n" >&2
-                        warp-cli --accept-tos status >&2
-                        exit 1
-                    fi
-                    printf "       (尝试 %s/%s) 等待重连...\n" "$CONNECT_WAIT_COUNT" "$MAX_CONNECT_WAIT_ATTEMPTS"
-                    sleep 3
-                done
-                printf "   ✅ WARP在 ns%s 中已成功重连并刷新IP。\n" "$1"
+                printf "   ✅ WARP在 ns%s 中已成功通过 endpoint reset 刷新IP。\n" "$1"
 
                 printf "     - 使用 socat 将流量从 0.0.0.0:%s 转发到 127.0.0.1:%s...\n" "$3" "$2"
                 nohup socat TCP4-LISTEN:"$3",fork,reuseaddr TCP4:127.0.0.1:"$2" >/dev/null 2>&1 &

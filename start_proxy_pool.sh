@@ -107,11 +107,38 @@ else
     echo "     ✅ flask 安装成功。建议创建 ${REQUIREMENTS_FILE} 文件以管理项目依赖。"
 fi
 
-# 4. 启动代理管理API服务 (后台运行)
+# 4. 从 create_warp_pool.sh 解析配置并导出为环境变量
+echo "   - 从 ${CREATE_WARP_POOL_SCRIPT} 解析配置..."
+
+# 使用grep和cut安全地提取值，并去除可能存在的注释和空格
+# grep -E '^[[:space:]]*POOL_SIZE=' 匹配以 POOL_SIZE= 开头（允许前面有空格）的行
+# cut -d'=' -f2- 获取等号后的所有内容
+# cut -d'#' -f1 获取注释前的内容
+# xargs echo -n 去除前后的空格
+POOL_SIZE_VALUE=$(grep -E '^[[:space:]]*POOL_SIZE=' "$CREATE_WARP_POOL_SCRIPT" | cut -d'=' -f2- | cut -d'#' -f1 | xargs echo -n)
+BASE_PORT_VALUE=$(grep -E '^[[:space:]]*BASE_PORT=' "$CREATE_WARP_POOL_SCRIPT" | cut -d'=' -f2- | cut -d'#' -f1 | xargs echo -n)
+
+if [ -z "$POOL_SIZE_VALUE" ] || [ -z "$BASE_PORT_VALUE" ]; then
+    echo "错误：无法从 ${CREATE_WARP_POOL_SCRIPT} 中解析 POOL_SIZE 或 BASE_PORT。" >&2
+    echo "请确保该文件中包含类似 'POOL_SIZE=3' 和 'BASE_PORT=10800' 的定义。" >&2
+    exit 1
+fi
+
+echo "     - 解析到 POOL_SIZE=${POOL_SIZE_VALUE}"
+echo "     - 解析到 BASE_PORT=${BASE_PORT_VALUE}"
+
+# 将解析出的值导出为环境变量，以便后续的python脚本可以读取
+export POOL_SIZE="$POOL_SIZE_VALUE"
+export BASE_PORT="$BASE_PORT_VALUE"
+echo "   ✅ 配置已作为环境变量导出。"
+
+
+# 5. 启动代理管理API服务 (后台运行)
 echo "   - 启动代理管理API服务 (${PROXY_MANAGER_SCRIPT})..."
 echo "     日志将输出到: ${LOG_FILE}"
 # 使用虚拟环境中的python执行脚本
 # 使用 nohup 和 & 实现后台运行，并将标准输出和标准错误重定向到日志文件
+# export过的环境变量会被nohup启动的子进程继承
 nohup "$VENV_PYTHON" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
 # 检查nohup命令是否成功启动进程 (注意：这只检查nohup本身，不检查python脚本是否正常运行)
 if [ $? -ne 0 ]; then
