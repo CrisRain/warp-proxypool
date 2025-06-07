@@ -328,13 +328,13 @@ socks pass {
 EOF
             echo "   ✅ Dante配置文件已创建于 ${DANTED_CONF_PATH}"
 
-            # 在后台启动 danted
-            sudo ip netns exec "ns$i" danted -f "$DANTED_CONF_PATH" -D
+            # 在后台启动 danted (使用绝对路径)
+            sudo ip netns exec "ns$i" /usr/sbin/danted -f "$DANTED_CONF_PATH" -D
             sleep 1 # 等待 danted 启动
             if ! sudo ip netns exec "ns$i" pgrep danted > /dev/null; then
                 echo "错误：在 ns$i 中启动 danted 服务器失败。请检查日志。" >&2
                 # 在前台运行以进行调试
-                sudo ip netns exec "ns$i" danted -f "$DANTED_CONF_PATH"
+                sudo ip netns exec "ns$i" /usr/sbin/danted -f "$DANTED_CONF_PATH"
                 exit 1
             fi
             echo "   ✅ Dante SOCKS 服务器在 ns$i 中已启动。"
