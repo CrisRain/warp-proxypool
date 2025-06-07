@@ -41,7 +41,7 @@ REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 # 注意: 这些配置应与 create_warp_pool.sh 脚本保持一致
 POOL_SIZE = int(os.environ.get('POOL_SIZE', 3))
 BASE_PORT = int(os.environ.get('BASE_PORT', 10800))
-WARP_INSTANCE_IP = os.environ.get('WARP_HOST_IP', '127.0.0.1') # 从环境变量读取主机IP，默认为127.0.0.1
+WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
 IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
 
 # --- 代理状态管理 ---
@@ -332,10 +332,15 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
 
         try:
             log_message(f"SOCKS处理器 {client_ip_str}: 正在通过后端SOCKS5 {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 ({target_host_str}, {target_port_int})...")
+            
+            # 根据端口号动态计算后端WARP实例的IP地址
+            proxy_index = acquired_backend_port - BASE_PORT
+            backend_warp_ip = f"10.0.{proxy_index}.2"
+
             remote_connection_to_target = socks.create_connection(
                 (target_host_str, target_port_int),
                 proxy_type=socks.SOCKS5,
-                proxy_addr=WARP_INSTANCE_IP,
+                proxy_addr=backend_warp_ip,
                 proxy_port=acquired_backend_port,
                 timeout=20
             )

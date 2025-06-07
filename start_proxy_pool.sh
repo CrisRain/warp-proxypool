@@ -63,71 +63,53 @@ fi
 echo "✅ 代理管理脚本 (${PROXY_MANAGER_SCRIPT}) 检查通过。"
 
 
-# --- 步骤1: 创建网络命名空间和WARP实例 ---
+# --- 步骤1: 创建网络环境 ---
 echo "-----------------------------------------------------"
-echo "⚙️  步骤1: 调用脚本创建网络命名空间和WARP实例..."
+echo "⚙️  步骤1: 调用脚本创建网络环境..."
 echo "-----------------------------------------------------"
-# 使用 sudo 执行，因为 create_warp_pool.sh 内部需要root权限
 sudo "$CREATE_WARP_POOL_SCRIPT" || { echo "错误：执行 ${CREATE_WARP_POOL_SCRIPT} 失败。" >&2; exit 1; }
-echo "✅ WARP实例和网络命名空间创建成功 (由 ${CREATE_WARP_POOL_SCRIPT} 完成)。"
+echo "✅ 网络环境创建成功。"
 
-
-# --- 步骤2: 设置Python环境并启动代理管理API ---
+# --- 步骤2: 准备Python环境 ---
 echo "-----------------------------------------------------"
-echo "🐍 步骤2: 设置Python环境并启动代理管理API..."
+echo "🐍 步骤2: 准备Python环境..."
 echo "-----------------------------------------------------"
-
-# 1. 创建Python虚拟环境 (如果尚不存在)
 if [ ! -d "$VENV_DIR" ]; then
     echo "   - 创建Python虚拟环境到 ${VENV_DIR}..."
     $PYTHON_CMD -m venv "$VENV_DIR" || { echo "错误：创建Python虚拟环境失败。" >&2; exit 1; }
     echo "   ✅ Python虚拟环境创建成功。"
-else
-    echo "   ℹ️  Python虚拟环境 ${VENV_DIR} 已存在。"
 fi
-
-# 2. 激活虚拟环境
-# source命令在子shell中执行时不会影响当前shell，所以后续命令需要在同一个上下文中执行
-# 或者，我们可以直接使用虚拟环境中的python和pip
 VENV_PYTHON="${VENV_DIR}/bin/python"
 VENV_PIP="${VENV_DIR}/bin/pip"
-
-echo "   - 使用虚拟环境: ${VENV_DIR}"
-
-# 3. 安装Python依赖
 echo "   - 安装Python依赖..."
-if [ -f "$REQUIREMENTS_FILE" ]; then
-    echo "     - 发现 ${REQUIREMENTS_FILE}，使用它安装依赖..."
-    "$VENV_PIP" install -r "$REQUIREMENTS_FILE" || { echo "错误：使用 ${REQUIREMENTS_FILE} 安装依赖失败。" >&2; exit 1; }
-    echo "     ✅ 使用 ${REQUIREMENTS_FILE} 安装依赖成功。"
-else
-    echo "     - 未找到 ${REQUIREMENTS_FILE}。"
-    echo "     - 尝试安装默认依赖: flask..."
-    "$VENV_PIP" install flask || { echo "错误：安装 flask 失败。" >&2; exit 1; }
-    echo "     ✅ flask 安装成功。建议创建 ${REQUIREMENTS_FILE} 文件以管理项目依赖。"
-fi
+"$VENV_PIP" install -r "$REQUIREMENTS_FILE" || { echo "错误：使用 ${REQUIREMENTS_FILE} 安装依赖失败。" >&2; exit 1; }
+echo "✅ Python环境准备就绪。"
 
-# 4. 启动代理管理API服务 (后台运行)
-echo "   - 启动代理管理API服务 (${PROXY_MANAGER_SCRIPT})..."
-echo "     日志将输出到: ${LOG_FILE}"
-# 使用虚拟环境中的python执行脚本
-# 使用 nohup 和 & 实现后台运行，并将标准输出和标准错误重定向到日志文件
-# 动态设置 WARP_HOST_IP 环境变量，以最可靠的方式连接到宿主机上的代理端口
-# 这会获取主机的主要IP地址，并将其传递给Python脚本，以绕过127.0.0.1连接的复杂性
-WARP_HOST_IP=$(hostname -I | awk '{print $1}')
-nohup env WARP_HOST_IP="$WARP_HOST_IP" "$VENV_PYTHON" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
-# 检查nohup命令是否成功启动进程 (注意：这只检查nohup本身，不检查python脚本是否正常运行)
-if [ $? -ne 0 ]; then
-    echo "错误：启动代理管理API (${PROXY_MANAGER_SCRIPT}) 失败。请检查 ${LOG_FILE} 获取详细信息。" >&2
-    exit 1
-fi
+# --- 步骤3: 在命名空间内启动代理管理器 ---
+echo "-----------------------------------------------------"
+echo "🚀 步骤3: 在管理器命名空间中启动服务..."
+echo "-----------------------------------------------------"
+# 从 create_warp_pool.sh 中获取变量定义
+source <(grep -E '^(POOL_SIZE|BASE_PORT|MANAGER_NS|MANAGER_IP|MANAGER_API_PORT|MANAGER_SOCKS_PORT)=' "$CREATE_WARP_POOL_SCRIPT")
 
-# 获取nohup启动的进程ID (可选，用于后续管理)
-PROXY_PID=$!
-echo "   ✅ 代理管理API服务已尝试启动 (PID: $PROXY_PID)。请检查日志 ${LOG_FILE} 确认运行状态。"
+echo "   - 在 $MANAGER_NS 中启动 proxy_manager.py..."
+sudo ip netns exec "$MANAGER_NS" "$VENV_PYTHON" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
+sleep 2
+echo "   ✅ proxy_manager.py 已启动，日志位于 $LOG_FILE"
+
+# --- 步骤4: 暴露服务端口 ---
+echo "-----------------------------------------------------"
+echo "🔗 步骤4: 暴露服务端口到宿主机..."
+echo "-----------------------------------------------------"
+echo "   - 暴露API端口: 127.0.0.1:$MANAGER_API_PORT -> $MANAGER_IP:$MANAGER_API_PORT"
+sudo socat TCP4-LISTEN:$MANAGER_API_PORT,fork,reuseaddr,bind=127.0.0.1 TCP4:$MANAGER_IP:$MANAGER_API_PORT &
+
+echo "   - 暴露SOCKS5端口: 127.0.0.1:$MANAGER_SOCKS_PORT -> $MANAGER_IP:$MANAGER_SOCKS_PORT"
+sudo socat TCP4-LISTEN:$MANAGER_SOCKS_PORT,fork,reuseaddr,bind=127.0.0.1 TCP4:$MANAGER_IP:$MANAGER_SOCKS_PORT &
+echo "✅ 服务端口暴露成功。"
 
 echo "====================================================="
 echo "🎉🎉🎉 代理池启动流程完成！🎉🎉🎉"
-echo "SOCKS5代理服务由 proxy_manager.py 提供，预计监听在 0.0.0.0:10880 (具体请参考 ${PROXY_MANAGER_SCRIPT} 的实现和日志 ${LOG_FILE})"
-echo "WARP实例的本地SOCKS5端口由 create_warp_pool.sh 配置 (通常从10800开始)。"
+echo "API服务监听在: 127.0.0.1:$MANAGER_API_PORT"
+echo "中央SOCKS5代理监听在: 127.0.0.1:$MANAGER_SOCKS_PORT"
 echo "====================================================="

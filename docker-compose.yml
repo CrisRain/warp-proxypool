@@ -1,27 +1,14 @@
 version: '3.8'
 
 services:
-  proxy-pool-service:
+  proxy-pool-dev-env:
     build:
       context: .
       dockerfile: Dockerfile
-    privileged: true # 赋予容器特权，以便执行网络操作
-    ports:
-      - "5000:5000" # 暴露 API 端口
-      - "10880:10880" # 暴露中央 SOCKS5 代理端口
-    environment:
-      - WARP_HOST_IP=host.docker.internal # 在容器中指定宿主机IP
+    # 赋予容器特权，以便在容器内手动运行 create_warp_pool.sh 等脚本进行调试
+    privileged: true
+    # 将项目目录挂载到容器的 /app 目录
     volumes:
-      - ./proxy_manager.log:/app/proxy_manager.log # 挂载日志文件 (可选)
-    extra_hosts:
-      - "host.docker.internal:host-gateway" # 确保容器内能通过 host.docker.internal 访问宿主机
-    entrypoint: ["/app/docker_entrypoint.sh"]
-    command: ["python3", "proxy_manager.py"]
-    # 如果需要确保 WARP 配置文件持久化或从外部提供，可以考虑挂载 /var/lib/cloudflare-warp
-    # volumes:
-    #   - ./proxy_manager.log:/app/proxy_manager.log
-    #   - warp-config:/var/lib/cloudflare-warp # 使用命名卷持久化 WARP 配置
-
-# 可选：定义命名卷
-# volumes:
-#   warp-config:
+      - .:/app
+    # 让容器保持运行，以便可以通过 docker exec 进入
+    command: tail -f /dev/null

@@ -4,27 +4,27 @@ set -euo pipefail
 
 echo "🚀 开始执行代理池停止脚本..."
 
-# --- 步骤1: 停止代理管理API服务 (proxy_manager.py) ---
+# --- 步骤1: 停止所有相关进程 ---
+# pkill 会杀死所有 socat 和 proxy_manager.py 进程
+# create_warp_pool.sh cleanup 会杀死所有命名空间内的进程
 echo "-----------------------------------------------------"
-echo "🛑 步骤1: 停止代理管理API服务 (proxy_manager.py)..."
+echo "🛑 步骤1: 停止所有相关服务进程..."
 echo "-----------------------------------------------------"
 # 使用 pgrep 和 pkill 查找并杀死包含 "proxy_manager.py" 的进程
-# -f 标志表示匹配完整命令行
 if pgrep -f "proxy_manager.py" &> /dev/null; then
     echo "   - 发现正在运行的 proxy_manager.py 进程，正在尝试停止..."
     pkill -f "proxy_manager.py"
-    # 等待一小会儿确保进程已退出
-    sleep 2
-    if pgrep -f "proxy_manager.py" &> /dev/null; then
-        echo "   - 警告：无法通过 pkill 停止进程，可能需要手动干预。"
-    else
-        echo "   ✅ proxy_manager.py 进程已成功停止。"
-    fi
-else
-    echo "   ℹ️  未发现正在运行的 proxy_manager.py 进程。"
 fi
+# 停止暴露端口的 socat 进程
+if pgrep -f "socat TCP4-LISTEN" &> /dev/null; then
+    echo "   - 发现正在运行的 socat 进程，正在尝试停止..."
+    pkill -f "socat TCP4-LISTEN"
+fi
+sleep 2
+echo "   ✅ 服务进程已停止。"
 
-# --- 步骤2: 清理网络命名空间和WARP实例 ---
+
+# --- 步骤2: 清理网络环境 ---
 echo "-----------------------------------------------------"
 echo "🧹 步骤2: 调用脚本清理网络资源..."
 echo "-----------------------------------------------------"
