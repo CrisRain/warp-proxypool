@@ -33,6 +33,18 @@ if [ "$EUID" -ne 0 ]; then
 fi
 printf "✅ root权限检查通过。\n"
 
+# 检查无密码sudo权限并启动一个后台进程来保持sudo会话活跃
+if sudo -n true 2>/dev/null; then
+    printf "✅ 无密码sudo权限检查通过，启动sudo会话保持进程。\n"
+    # 在后台循环中运行 `sudo -v` 来刷新sudo时间戳
+    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done &>/dev/null &
+    SUDO_KEEPALIVE_PID=$!
+    # 设置一个陷阱，在脚本退出时杀死后台进程
+    trap "kill $SUDO_KEEPALIVE_PID &>/dev/null" EXIT
+else
+    printf "警告：无法获取无密码sudo权限。脚本执行期间可能需要您输入密码。\n" >&2
+fi
+
 # --- 函数定义 ---
 
 # 清理函数
@@ -163,7 +175,7 @@ create_pool() {
     printf "🚀 开始启用IP转发...\n"
     sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || { printf "错误：启用IP转发失败。\n" >&2; exit 1; }
     # 允许将发往127.0.0.1的流量进行路由，这是让iptables OUTPUT链规则对localhost生效的关键
-    sudo sysctl -w net.ipv4.conf.lo.route_localnet=1 >/dev/null 2>&1 || { printf "警告：设置 route_localnet 失败，直接访问127.0.0.1的端口可能不工作。\n" >&2; }
+    sudo sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || { printf "警告：设置 route_localnet 失败，直接访问127.0.0.1的端口可能不工作。\n" >&2; }
     printf "✅ IP转发和本地网络路由已启用。\n"
 
     printf "🚀 开始创建 WARP 代理池...\n"
@@ -357,6 +369,26 @@ create_pool() {
                 done
                 printf "   ✅ WARP在 ns%s 中已成功初始化并连接。\n" "$1"
 
+                printf "     - 执行断线重连以强制刷新IP...\n"
+                warp-cli --accept-tos disconnect >/dev/null 2>&1 || true
+                sleep 3
+                warp-cli --accept-tos connect >/dev/null 2>&1 || { printf "错误：断线重连后再次连接WARP失败。\n" >&2; exit 1; }
+                
+                printf "     - 等待重连成功...\n"
+                MAX_CONNECT_WAIT_ATTEMPTS=30
+                CONNECT_WAIT_COUNT=0
+                while ! warp-cli --accept-tos status | grep -E -q "Status( update)?:[[:space:]]*Connected"; do
+                    CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
+                    if [ $CONNECT_WAIT_COUNT -gt $MAX_CONNECT_WAIT_ATTEMPTS ]; then
+                        printf "错误：断线重连后状态检查失败 (超时)。\n" >&2
+                        warp-cli --accept-tos status >&2
+                        exit 1
+                    fi
+                    printf "       (尝试 %s/%s) 等待重连...\n" "$CONNECT_WAIT_COUNT" "$MAX_CONNECT_WAIT_ATTEMPTS"
+                    sleep 3
+                done
+                printf "   ✅ WARP在 ns%s 中已成功重连并刷新IP。\n" "$1"
+
                 printf "     - 使用 socat 将流量从 0.0.0.0:%s 转发到 127.0.0.1:%s...\n" "$3" "$2"
                 nohup socat TCP4-LISTEN:"$3",fork,reuseaddr TCP4:127.0.0.1:"$2" >/dev/null 2>&1 &
                 sleep 2
@@ -371,12 +403,13 @@ create_pool() {
             # 12. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
             printf "   - 步骤12/12: 创建端口映射 主机端口 %s -> %s:%s...\n" "$HOST_PORT" "$NAMESPACE_IP" "$SOCAT_LISTEN_PORT"
-            # 为外部流量和本地流量都创建DNAT规则
+            # 为外部流量创建DNAT规则
             if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
                 sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { printf "错误：创建PREROUTING DNAT规则失败。\n" >&2; exit 1; }
             fi
-            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { printf "错误：创建OUTPUT DNAT规则失败。\n" >&2; exit 1; }
+            # 为本机流量(127.0.0.1)创建DNAT规则
+            if ! sudo iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
+                sudo iptables -t nat -I OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { printf "错误：创建OUTPUT DNAT规则失败。\n" >&2; exit 1; }
             fi
             printf "   ✅ 端口映射创建成功。\n"
 

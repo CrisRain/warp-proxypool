@@ -100,8 +100,8 @@ cleanup() {
         while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
             sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
+        while sudo iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
+            sudo iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
         done
         # 清理 FORWARD 规则
         while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
@@ -169,6 +169,18 @@ main() {
       exit 1
     fi
     printf "✅ root权限检查通过。\n"
+
+    # 检查无密码sudo权限并启动一个后台进程来保持sudo会话活跃
+    if sudo -n true 2>/dev/null; then
+        printf "✅ 无密码sudo权限检查通过，启动sudo会话保持进程。\n"
+        # 在后台循环中运行 `sudo -v` 来刷新sudo时间戳
+        while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done &>/dev/null &
+        SUDO_KEEPALIVE_PID=$!
+        # 设置一个陷阱，在脚本退出时杀死后台进程
+        trap "kill $SUDO_KEEPALIVE_PID &>/dev/null" EXIT
+    else
+        printf "警告：无法获取无密码sudo权限。脚本执行期间可能需要您输入密码。\n" >&2
+    fi
 
     # 首先停止代理管理器
     stop_proxy_manager
