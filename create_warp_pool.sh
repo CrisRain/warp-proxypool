@@ -15,9 +15,6 @@ WARP_LICENSE_KEY=""
 # 自定义WARP端点IP和端口 (可选)
 WARP_ENDPOINT=""
 
-# 自定义WARP代理端口 (可选)
-CUSTOM_PROXY_PORT=""
-
 # --- 前置检查 ---
 if ! command -v warp-cli &> /dev/null; then
     echo "错误：warp-cli 命令未找到。请确保已正确安装 Cloudflare WARP 客户端。" >&2
@@ -48,31 +45,31 @@ cleanup() {
     fi
 
     # 杀死所有残留的 warp-svc 和 warp-cli 进程
-    echo "   - 停止所有残留的 WARP 进程..."
+    echo "   - 停止所有残留的 WARP 和转发进程..."
     sudo pkill -f warp-svc || true
     sudo pkill -f warp-cli || true
-    sudo pkill -f danted || true
+    sudo pkill -f socat || true
     sleep 2 # 等待进程完全退出
-    echo "   ✅ WARP 进程已清理。"
+    echo "   ✅ WARP 和转发进程已清理。"
 
     # 清理 iptables 规则
     echo "   - 清理iptables规则..."
-    SOCKS_PORT_IN_NAMESPACE=${CUSTOM_PROXY_PORT:-40000}
+    SOCAT_LISTEN_PORT=40001 # socat 监听的端口
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         HOST_PORT=$((BASE_PORT + $i))
         SUBNET_THIRD_OCTET=$i
         NAMESPACE_IP="10.0.${SUBNET_THIRD_OCTET}.2"
         
         # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
-        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; do
-            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE
+        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
+            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE
+        while sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
+            sudo iptables -t nat -D OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT
         done
         # 清理 FORWARD 规则
-        while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT
+        while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
+            sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT
         done
     done
     
@@ -144,8 +141,6 @@ create_pool() {
             # 1.5. 为命名空间配置DNS解析
             echo "   - 步骤1.5/8: 为 ns$i 配置DNS..."
             sudo mkdir -p "/etc/netns/ns$i"
-            # 根据您的要求，强制使用 1.1.1.1 作为 DNS
-            # 使用 Cloudflare 和 Google 的 DNS，增加冗余
             cat <<EOF | sudo tee "/etc/netns/ns$i/resolv.conf" > /dev/null
 nameserver 1.1.1.1
 nameserver 8.8.8.8
@@ -194,21 +189,20 @@ EOF
             echo "   ✅ NAT和转发规则配置成功。"
 
             # 7. 初始化WARP
-            SOCKS_PORT_IN_NAMESPACE=${CUSTOM_PROXY_PORT:-40000}
-            echo "   - 步骤7/8: 在 ns$i 中初始化WARP (内部SOCKS5端口: $SOCKS_PORT_IN_NAMESPACE)..."
+            WARP_INTERNAL_PORT=40000
+            echo "   - 步骤7/8: 在 ns$i 中初始化WARP (内部SOCKS5端口: $WARP_INTERNAL_PORT)..."
             
             sudo ip netns exec "ns$i" bash -c '
                 set -euo pipefail
                 
                 # 从参数中获取变量
                 i="$1"
-                CUSTOM_PROXY_PORT="$2"
+                WARP_INTERNAL_PORT_TO_SET="$2"
                 WARP_LICENSE_KEY="$3"
                 WARP_ENDPOINT="$4"
                 
                 # 检查外网连通性
                 echo "     - 检查外网连通性..."
-                # 使用 ping 代替 nslookup 进行连通性测试，-c 1 表示只发送一个包
                 if ! timeout 10s ping -c 1 api.cloudflareclient.com >/dev/null 2>&1; then
                     sleep 2
                     if ! timeout 10s ping -c 1 api.cloudflareclient.com >/dev/null 2>&1; then
@@ -223,7 +217,7 @@ EOF
 
                 echo "     - 启动WARP服务守护进程..."
                 warp-svc &
-                sleep 8 # 给 warp-svc 更多启动时间
+                sleep 8
 
                 echo "     - 等待WARP服务IPC Socket就绪..."
                 _MAX_SVC_WAIT_ATTEMPTS=20
@@ -261,9 +255,9 @@ EOF
                 echo "     - 设置WARP为SOCKS5代理模式..."
                 warp-cli --accept-tos mode proxy || { echo "错误：设置WARP代理模式失败。" >&2; exit 1; }
                 
-                if [ -n "$CUSTOM_PROXY_PORT" ]; then
-                    echo "     - 设置自定义SOCKS5代理端口: $CUSTOM_PROXY_PORT..."
-                    warp-cli --accept-tos proxy port "$CUSTOM_PROXY_PORT" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
+                if [ -n "$WARP_INTERNAL_PORT_TO_SET" ]; then
+                    echo "     - 设置自定义SOCKS5代理端口: $WARP_INTERNAL_PORT_TO_SET..."
+                    warp-cli --accept-tos proxy port "$WARP_INTERNAL_PORT_TO_SET" || echo "警告：设置自定义代理端口失败，可能warp-cli版本不支持。"
                 fi
                 
                 if [ -n "$WARP_LICENSE_KEY" ]; then
@@ -283,7 +277,6 @@ EOF
                 echo "     - 等待WARP连接成功..."
                 MAX_CONNECT_WAIT_ATTEMPTS=30
                 CONNECT_WAIT_COUNT=0
-                # 使用更健壮的grep来检查连接状态，兼容 "Status: Connected" 和 "Status update: Connected"
                 while ! warp-cli --accept-tos status | grep -E -q "Status( update)?:[[:space:]]*Connected"; do
                     CONNECT_WAIT_COUNT=$(($CONNECT_WAIT_COUNT+1))
                     if [ $CONNECT_WAIT_COUNT -gt $MAX_CONNECT_WAIT_ATTEMPTS ]; then
@@ -295,24 +288,20 @@ EOF
                     sleep 3
                 done
                 echo "   ✅ WARP在 ns$i 中已成功初始化并连接。"
-            ' bash "$i" "$CUSTOM_PROXY_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
+            ' bash "$i" "$WARP_INTERNAL_PORT" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" || { echo "错误：在 ns$i 中初始化WARP失败。" >&2; exit 1; }
 
             # 7.5. 使用 socat 将流量转发到 WARP
-            echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCKS_PORT_IN_NAMESPACE} 转发到 127.0.0.1:40000..."
-            WARP_INTERNAL_PORT=40000 # WARP 内部监听的端口
+            SOCAT_LISTEN_PORT=40001
+            echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT} 转发到 127.0.0.1:${WARP_INTERNAL_PORT}..."
             
             # 在后台使用 nsenter 启动 socat
-            # TCP4-LISTEN: 监听在命名空间内的所有IPv4地址上
-            # fork: 为每个连接创建一个新进程
-            # reuseaddr: 允许立即重用端口
-            # TCP4: 连接到 WARP 的内部端口
             sudo nsenter --net="/var/run/netns/ns$i" \
-                socat TCP4-LISTEN:"$SOCKS_PORT_IN_NAMESPACE",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" &
+                socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" &
             
             sleep 2 # 等待 socat 启动
             
             # 检查 socat 进程是否在运行
-            if ! sudo nsenter --net="/var/run/netns/ns$i" pgrep -f "socat TCP4-LISTEN:${SOCKS_PORT_IN_NAMESPACE}" > /dev/null; then
+            if ! sudo nsenter --net="/var/run/netns/ns$i" pgrep -f "socat TCP4-LISTEN:${SOCAT_LISTEN_PORT}" > /dev/null; then
                 echo "错误：在 ns$i 中启动 socat 失败。" >&2
                 exit 1
             fi
@@ -320,16 +309,16 @@ EOF
 
             # 8. 创建端口映射
             HOST_PORT=$((BASE_PORT + $i))
-            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE..."
+            echo "   - 步骤8/8: 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:${SOCAT_LISTEN_PORT}..."
             # 为外部流量和本地流量都创建DNAT规则
-            if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; then
-                sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
+            if ! sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
+                sudo iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建PREROUTING DNAT规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE &> /dev/null; then
-                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCKS_PORT_IN_NAMESPACE || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
+            if ! sudo iptables -t nat -C OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
+                sudo iptables -t nat -I OUTPUT -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || { echo "错误：创建OUTPUT DNAT规则失败。" >&2; exit 1; }
             fi
-            if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT &> /dev/null; then
-                sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCKS_PORT_IN_NAMESPACE -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
+            if ! sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; then
+                sudo iptables -I FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT || { echo "错误：创建FORWARD规则失败。" >&2; exit 1; }
             fi
             echo "   ✅ 端口映射创建成功。"
 
