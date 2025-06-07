@@ -294,9 +294,9 @@ EOF
             SOCAT_LISTEN_PORT=40001
             echo "   - 步骤7.5/8: 使用 socat 将流量从 0.0.0.0:${SOCAT_LISTEN_PORT} 转发到 127.0.0.1:${WARP_INTERNAL_PORT}..."
             
-            # 在后台使用 nsenter 启动 socat，并将所有输入输出重定向到 /dev/null
-            sudo nsenter --net="/var/run/netns/ns$i" \
-                socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" </dev/null >/dev/null 2>&1 &
+            # 在后台使用 nsenter 启动 socat，并将所有输入输出重定向到 /dev/null 以实现真正的后台运行
+            ( sudo nsenter --net="/var/run/netns/ns$i" \
+                socat TCP4-LISTEN:"$SOCAT_LISTEN_PORT",fork,reuseaddr TCP4:127.0.0.1:"$WARP_INTERNAL_PORT" & ) </dev/null >/dev/null 2>&1
             
             sleep 2 # 等待 socat 启动
             
