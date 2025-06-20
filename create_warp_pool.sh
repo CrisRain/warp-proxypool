@@ -4,6 +4,13 @@
 # -u: 使用未定义变量时报错
 # -o pipefail: 管道中任一命令失败则整个管道失败
 set -euo pipefail
+# --- 权限检查和SUDO变量定义 ---
+# 必须在脚本早期定义SUDO，因为 set -u 会在未定义变量被使用时报错
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+else
+    SUDO=""
+fi
 
 # 强制加载 nat 模块，防止 iptables 操作静默失败
 $SUDO modprobe iptable_nat || log "WARNING" "加载 iptable_nat 模块失败，nat 表可能无法正常工作。"
@@ -52,14 +59,12 @@ log "INFO" "✅ 所有必要命令检查通过。"
 # 检查root权限或sudo权限
 if [ "$EUID" -ne 0 ]; then
     # 检查无密码sudo权限
-    if ! sudo -n true 2>/dev/null; then
+    if ! $SUDO -n true 2>/dev/null; then
         log "ERROR" "需要root权限或配置无密码sudo。"
         exit 1
     fi
     log "INFO" "⚠️ 使用sudo权限运行"
-    SUDO="sudo"
 else
-    SUDO=""
     log "INFO" "✅ root权限检查通过。"
 fi
 
