@@ -5,6 +5,9 @@
 # -o pipefail: 管道中任一命令失败则整个管道失败
 set -euo pipefail
 
+# 强制加载 nat 模块，防止 iptables 操作静默失败
+$SUDO modprobe iptable_nat || log "WARNING" "加载 iptable_nat 模块失败，nat 表可能无法正常工作。"
+
 # --- 配置参数 ---
 POOL_SIZE=3                 # 代理池大小
 BASE_PORT=10800             # SOCKS5代理的基础端口号
@@ -19,20 +22,20 @@ LOG_FILE="/var/log/warp-pool.log"             # 日志文件路径
 log() {
     local level=$1
     local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    local log_entry
-    log_entry=$(printf "[%s] [%s] %s" "$timestamp" "$level" "$message")
-    # 输出到标准错误 (控制台)
-    echo "$log_entry" >&2
-    # 同时追加到日志文件，使用sudo tee以处理权限问题
-    # 确保SUDO变量在使用前已定义，脚本稍后会定义它
-    if [ -z "${SUDO+x}" ]; then # 检查SUDO是否已设置
-        # 在SUDO定义前，直接尝试写入，或缓冲日志稍后写入
-        # 为简单起见，早期日志可能只输出到stderr，或依赖后续的sudo touch/chmod
-        echo "$log_entry" >> "$LOG_FILE" 2>/dev/null || true
+    local timestamp
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+
+    # 输出到标准错误 (控制台) - 使用 printf 直接格式化输出
+    printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >&2
+
+    # 同时追加到日志文件
+    if [ -z "${SUDO+x}" ] || [ -z "$SUDO" ]; then # 如果 SUDO 未定义或为空 (例如以root运行)
+        # 直接使用 printf 写入日志文件
+        printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" >> "$LOG_FILE" 2>/dev/null || true
     else
-        # 使用sudo tee写入文件，并确保tee本身不向标准输出或标准错误输出任何内容
-        echo "$log_entry" | $SUDO tee -a "$LOG_FILE" >/dev/null 2>&1
+        # SUDO 已定义且非空，使用 printf 将格式化后的字符串通过管道传递给 sudo tee
+        # tee 的标准输出和标准错误都重定向到 /dev/null，防止重复打印到屏幕
+        printf "[%s] [%s] %s\n" "$timestamp" "$level" "$message" | $SUDO tee -a "$LOG_FILE" >/dev/null 2>&1
     fi
 }
 
@@ -226,8 +229,18 @@ cleanup() {
                     d_subnet_val="${BASH_REMATCH[1]}"
                 fi
 
-                if { [ -n "$s_subnet_val" ] && [ -n "${script_subnets[$s_subnet_val]}" ]; } || \
-                   { [ -n "$d_subnet_val" ] && [ -n "${script_subnets[$d_subnet_val]}" ]; }; then
+                # 安全地检查键是否存在于关联数组中，以兼容 set -u
+                # ${array[key]+_} 当键存在时会扩展为 _, 否则为空
+                local s_subnet_exists=0
+                local d_subnet_exists=0
+                if [ -n "$s_subnet_val" ] && [[ ${script_subnets[$s_subnet_val]+_} ]]; then
+                    s_subnet_exists=1
+                fi
+                if [ -n "$d_subnet_val" ] && [[ ${script_subnets[$d_subnet_val]+_} ]]; then
+                    d_subnet_exists=1
+                fi
+
+                if [ "$s_subnet_exists" -eq 1 ] || [ "$d_subnet_exists" -eq 1 ]; then
                     should_delete=1
                 fi
             fi
@@ -462,7 +475,8 @@ create_pool() {
     # 启用IP转发和相关内核参数
     $SUDO sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || \
         { log "ERROR" "启用IP转发失败。"; exit 1; }
-    $SUDO sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || \
+    # 使用更可靠的方式确保 route_localnet 生效
+    $SUDO sh -c "echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet" || \
         log "WARNING" "设置route_localnet失败，直接访问127.0.0.1的端口可能不工作。"
     log "INFO" "✅ IP转发和本地网络路由已启用。"
     
@@ -589,7 +603,9 @@ create_pool() {
                     { log "ERROR" "创建PREROUTING DNAT规则失败。"; exit 1; }
             fi
             
-            # 为本机流量创建DNAT规则
+            # 为本机流量创建DNAT规则 (先清空以确保幂等性)
+            log "INFO" "   - 刷新 nat OUTPUT 链以确保规则纯净..."
+            $SUDO iptables -t nat -F OUTPUT
             if ! $SUDO iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
                 $SUDO iptables -t nat -I OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || \
                     { log "ERROR" "创建OUTPUT DNAT规则失败。"; exit 1; }
