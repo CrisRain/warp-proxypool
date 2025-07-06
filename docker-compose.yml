@@ -12,10 +12,10 @@ services:
     volumes:
       - ./proxy_manager.log:/app/proxy_manager.log # 挂载日志文件 (可选)
     # 如果需要确保 WARP 配置文件持久化或从外部提供，可以考虑挂载 /var/lib/cloudflare-warp
-    # volumes:
-    #   - ./proxy_manager.log:/app/proxy_manager.log
-    #   - warp-config:/var/lib/cloudflare-warp # 使用命名卷持久化 WARP 配置
+    volumes:
+      - ./proxy_manager.log:/app/proxy_manager.log
+      - warp-config:/var/lib/cloudflare-warp # 使用命名卷持久化 WARP 配置
 
 # 可选：定义命名卷
-# volumes:
-#   warp-config:
+volumes:
+  warp-config:

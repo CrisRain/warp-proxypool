@@ -89,24 +89,23 @@ cleanup() {
 
     # 2. 清理 iptables 规则
     printf "   - 步骤2: 清理iptables规则...\n"
-    SOCAT_LISTEN_PORT=40001 # socat 监听的端口
     for i in $(seq 0 $(($POOL_SIZE-1))); do
         HOST_PORT=$((BASE_PORT + $i))
-        SUBNET_THIRD_OCTET=$i
-        NAMESPACE_IP="10.0.${SUBNET_THIRD_OCTET}.2"
-        SUBNET="10.0.$i.0/24"
-        
-        # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)
-        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
+        # 使用与 create_warp_pool.sh 中一致的子网计算逻辑
+        SUBNET_THIRD_OCTET=$((i / 256))
+        SUBNET_FOURTH_OCTET=$((i % 256))
+        NAMESPACE_IP="10.${SUBNET_THIRD_OCTET}.${SUBNET_FOURTH_OCTET}.2"
+        SUBNET="10.${SUBNET_THIRD_OCTET}.${SUBNET_FOURTH_OCTET}.0/24"
+        WARP_INTERNAL_PORT=$((40000 + i))
+
+        # 清理 DNAT 规则 (PREROUTING 和 OUTPUT)，现在直接指向 WARP 内部端口
+        while sudo iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT &> /dev/null; do
+            sudo iptables -t nat -D PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT >/dev/null 2>&1
         done
-        while sudo iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; do
-            sudo iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT >/dev/null 2>&1
+        while sudo iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT &> /dev/null; do
+            sudo iptables -t nat -D OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT >/dev/null 2>&1
         done
-        # 清理 FORWARD 规则
-        while sudo iptables -C FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT &> /dev/null; do
-            sudo iptables -D FORWARD -p tcp -d $NAMESPACE_IP --dport $SOCAT_LISTEN_PORT -j ACCEPT >/dev/null 2>&1
-        done
+        # 不再需要针对 socat 端口的特定 FORWARD 规则
         # 清理通用的 MASQUERADE 和 FORWARD 规则
         while sudo iptables -t nat -C POSTROUTING -s $SUBNET -j MASQUERADE &> /dev/null; do
             sudo iptables -t nat -D POSTROUTING -s $SUBNET -j MASQUERADE >/dev/null 2>&1
@@ -124,7 +123,7 @@ cleanup() {
     printf "   - 步骤3: 停止所有残留的 WARP 和转发进程 (全局)...\n"
     sudo pkill -9 -f warp-svc >/dev/null 2>&1 || true
     sudo pkill -9 -f warp-cli >/dev/null 2>&1 || true
-    sudo pkill -9 -f socat >/dev/null 2>&1 || true
+    # socat 已被移除，无需再杀死其进程
     sleep 1
     printf "   ✅ 全局 WARP 和转发进程已清理。\n"
     

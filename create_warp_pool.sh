@@ -48,7 +48,7 @@ log() {
 
 # --- 前置检查 ---
 # 检查必要命令是否存在
-for cmd in warp-cli ip iptables sysctl socat mkdir tee flock; do
+for cmd in warp-cli ip iptables sysctl mkdir tee flock; do
     if ! command -v "$cmd" &> /dev/null; then
         log "ERROR" "命令未找到: $cmd。请确保已安装必要的依赖。"
         exit 1
@@ -89,85 +89,18 @@ fi
 # 清理函数
 cleanup() {
     log "INFO" "🧹 开始进行彻底清理，确保环境干净..."
-    
-    # 1. 清理所有网络命名空间（而不仅限于当前POOL_SIZE范围）
-    log "INFO" "   - 步骤1: 清理所有网络命名空间、挂载点、进程、veth设备和DNS配置..."
-    for NS_NAME in $($SUDO ip netns list | awk '{print $1}'); do
-        # 仅处理以 "ns" 开头的命名空间（脚本创建的）
-        if [[ "$NS_NAME" =~ ^ns[0-9]+$ ]]; then
-            log "INFO" "     - 正在清理命名空间 $NS_NAME..."
-            
-            # 获取索引号
-            local idx=${NS_NAME#ns}
-            
-            # 卸载绑定挂载
-            log "INFO" "       - 卸载绑定挂载..."
-            $SUDO ip netns exec "$NS_NAME" sh -c '
-                WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
-                WARP_SYSTEM_IPC_DIR="/run/cloudflare-warp"
-                
-                if mount | grep -q "on $WARP_SYSTEM_CONFIG_DIR type"; then
-                    umount "$WARP_SYSTEM_CONFIG_DIR" || true
-                fi
-                
-                if mount | grep -q "on $WARP_SYSTEM_IPC_DIR type"; then
-                    umount "$WARP_SYSTEM_IPC_DIR" || true
-                fi
-            '
-            
-            # 强制杀死命名空间内的所有进程
-            log "INFO" "       - 停止 $NS_NAME 内的所有进程..."
-            if pids=$($SUDO ip netns pids "$NS_NAME" 2>/dev/null); then
-                [ -n "$pids" ] && $SUDO kill -9 $pids >/dev/null 2>&1 || true
-            fi
-            sleep 1
-            
-            # 删除命名空间
-            log "INFO" "       - 删除命名空间 $NS_NAME..."
-            $SUDO ip netns del "$NS_NAME" >/dev/null 2>&1 || true
-            
-            # 删除veth设备
-            local VETH_HOST="veth$idx"
-            if ip link show "$VETH_HOST" &> /dev/null; then
-                log "INFO" "     - 删除 veth 设备 $VETH_HOST..."
-                $SUDO ip link del "$VETH_HOST" >/dev/null 2>&1 || true
-            fi
-            
-            # 清理DNS配置文件
-            if [ -d "/etc/netns/$NS_NAME" ]; then
-                log "INFO" "     - 删除DNS配置 /etc/netns/$NS_NAME..."
-                $SUDO rm -rf "/etc/netns/$NS_NAME" >/dev/null 2>&1 || true
-            fi
-            
-            # 清理独立的WARP配置目录
-            local INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/${NS_NAME}"
-            if [ -d "$INSTANCE_CONFIG_DIR" ]; then
-                log "INFO" "     - 删除独立的WARP配置目录 $INSTANCE_CONFIG_DIR..."
-                $SUDO rm -rf "$INSTANCE_CONFIG_DIR" >/dev/null 2>&1 || true
-            fi
-            
-            # 清理独立的WARP IPC目录
-            local INSTANCE_IPC_DIR="${WARP_IPC_BASE_DIR}/${NS_NAME}"
-            if [ -d "$INSTANCE_IPC_DIR" ]; then
-                log "INFO" "     - 删除独立的WARP IPC目录 $INSTANCE_IPC_DIR..."
-                $SUDO rm -rf "$INSTANCE_IPC_DIR" >/dev/null 2>&1 || true
-            fi
-        fi
-    done
-    log "INFO" "   ✅ 网络命名空间、veth设备及相关配置已清理。"
-    
-    # 2. 清理 iptables 规则
-    log "INFO" "   - 步骤2: 清理iptables规则 (更精确的方式)..."
 
-    # 收集所有由本脚本管理的网络命名空间的相关参数
-    # 这些参数定义了脚本创建的规则的“签名”
+    # 1. 预先收集所有需要清理的iptables规则信息
+    # 必须在删除命名空间之前进行，否则无法获取到相关信息
+    log "INFO" "   - 步骤1: 预扫描现有命名空间以准备清理iptables规则..."
     declare -A script_subnets
     declare -A script_host_ports
     declare -A script_namespace_ips
-    declare -A script_socat_ports
+    declare -a existing_ns_names
 
     for NS_NAME_CLEANUP in $($SUDO ip netns list 2>/dev/null | awk '{print $1}'); do
         if [[ "$NS_NAME_CLEANUP" =~ ^ns([0-9]+)$ ]]; then
+            existing_ns_names+=("$NS_NAME_CLEANUP") # 保存命名空间名称以供后续清理
             local idx_cleanup=${BASH_REMATCH[1]}
             script_host_ports[$((BASE_PORT + idx_cleanup))]=1
 
@@ -175,121 +108,200 @@ cleanup() {
             local subnet_fourth_octet_cleanup=$((idx_cleanup % 256))
             script_namespace_ips["10.${subnet_third_octet_cleanup}.${subnet_fourth_octet_cleanup}.2"]=1
             script_subnets["10.${subnet_third_octet_cleanup}.${subnet_fourth_octet_cleanup}.0/24"]=1
-            # WARP_INTERNAL_PORT=$((40000 + i)), SOCAT_LISTEN_PORT=$((40001 + i))
-            # DNAT target is SOCAT_LISTEN_PORT
-            script_socat_ports[$((40001 + idx_cleanup))]=1
         fi
     done
+    log "INFO" "   ✅ 完成预扫描，已识别 ${#existing_ns_names[@]} 个由脚本管理的命名空间。"
 
-    current_table=""
-    # 使用进程替换来读取 iptables-save 的输出
-    while IFS= read -r rule_line; do
-        if [[ "$rule_line" == \** ]]; then # 表名行, 例如 *nat
-            current_table="${rule_line#\*}"
-            continue
-        fi
+    # 2. 清理 iptables 规则
+    log "INFO" "   - 步骤2: 清理iptables规则..."
+    if [ ${#existing_ns_names[@]} -gt 0 ]; then
+        current_table=""
+        # 使用进程替换来读取 iptables-save 的输出
+        while IFS= read -r rule_line; do
+            if [[ "$rule_line" == \** ]]; then # 表名行, 例如 *nat
+                current_table="${rule_line#\*}"
+                continue
+            fi
 
-        if [[ "$rule_line" == -A* ]]; then # 规则行, 例如 -A PREROUTING ...
-            local chain_name=$(echo "$rule_line" | awk '{print $2}')
-            # 获取 "-A CHAIN" 之后的规则部分
-            local rule_spec=$(echo "$rule_line" | sed 's/^-A [^ ]* //')
-            local should_delete=0
+            if [[ "$rule_line" == -A* ]]; then # 规则行, 例如 -A PREROUTING ...
+                local chain_name=$(echo "$rule_line" | awk '{print $2}')
+                # 获取 "-A CHAIN" 之后的规则部分
+                local rule_spec=$(echo "$rule_line" | sed 's/^-A [^ ]* //')
+                local should_delete=0
 
-            # 检查 DNAT 规则 (在 nat 表中)
-            if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j DNAT"* ]]; then
-                local dport_val=""
-                local to_dest_ip_val=""
-                local to_dest_port_val=""
+                # 检查 DNAT 规则 (在 nat 表中)
+                if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j DNAT"* ]]; then
+                    local dport_val=""
+                    local to_dest_ip_val=""
+                    local to_dest_port_val=""
 
-                if [[ "$rule_spec" =~ --dport[[:space:]]+([0-9]+) ]]; then
-                    dport_val="${BASH_REMATCH[1]}"
-                fi
-                if [[ "$rule_spec" =~ --to-destination[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+) ]]; then
-                    to_dest_ip_val="${BASH_REMATCH[1]}"
-                    to_dest_port_val="${BASH_REMATCH[2]}"
-                fi
+                    if [[ "$rule_spec" =~ --dport[[:space:]]+([0-9]+) ]]; then
+                        dport_val="${BASH_REMATCH[1]}"
+                    fi
+                    if [[ "$rule_spec" =~ --to-destination[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+) ]]; then
+                        to_dest_ip_val="${BASH_REMATCH[1]}"
+                        to_dest_port_val="${BASH_REMATCH[2]}"
+                    fi
 
-                if [ -n "$dport_val" ] && [ -n "$to_dest_ip_val" ] && [ -n "$to_dest_port_val" ]; then
-                    # 检查提取到的端口和IP是否由本脚本管理
-                    if [[ -n "${script_host_ports[$dport_val]}" && \
-                          -n "${script_namespace_ips[$to_dest_ip_val]}" && \
-                          -n "${script_socat_ports[$to_dest_port_val]}" ]]; then
-                        # 进一步检查链名是否为 PREROUTING 或 OUTPUT (针对127.0.0.1的流量)
-                        if [[ "$chain_name" == "PREROUTING" || \
-                              ( "$chain_name" == "OUTPUT" && "$rule_spec" =~ -d[[:space:]]+127\.0\.0\.1 ) ]]; then
-                            should_delete=1
+                    if [ -n "$dport_val" ] && [ -n "$to_dest_ip_val" ] && [ -n "$to_dest_port_val" ]; then
+                        if [[ -n "${script_host_ports[$dport_val]}" && \
+                              -n "${script_namespace_ips[$to_dest_ip_val]}" ]]; then
+                            if [[ "$chain_name" == "PREROUTING" || \
+                                  ( "$chain_name" == "OUTPUT" && "$rule_spec" =~ -d[[:space:]]+127\.0\.0\.1 ) ]]; then
+                                should_delete=1
+                            fi
                         fi
                     fi
                 fi
-            fi
 
-            # 检查 FORWARD 规则 (在 filter 表中)
-            if [ "$current_table" == "filter" ] && [[ "$rule_spec" == *"-j ACCEPT"* && "$chain_name" == "FORWARD" ]]; then
-                local s_subnet_val=""
-                local d_subnet_val=""
-                if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
-                    s_subnet_val="${BASH_REMATCH[1]}"
-                fi
-                if [[ "$rule_spec" =~ -d[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
-                    d_subnet_val="${BASH_REMATCH[1]}"
+                # 检查 FORWARD 规则 (在 filter 表中)
+                if [ "$current_table" == "filter" ] && [[ "$rule_spec" == *"-j ACCEPT"* && "$chain_name" == "FORWARD" ]]; then
+                    local s_subnet_val=""
+                    local d_subnet_val=""
+                    if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                        s_subnet_val="${BASH_REMATCH[1]}"
+                    fi
+                    if [[ "$rule_spec" =~ -d[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                        d_subnet_val="${BASH_REMATCH[1]}"
+                    fi
+
+                    local s_subnet_exists=0
+                    local d_subnet_exists=0
+                    if [ -n "$s_subnet_val" ] && [[ ${script_subnets[$s_subnet_val]+_} ]]; then
+                        s_subnet_exists=1
+                    fi
+                    if [ -n "$d_subnet_val" ] && [[ ${script_subnets[$d_subnet_val]+_} ]]; then
+                        d_subnet_exists=1
+                    fi
+
+                    if [ "$s_subnet_exists" -eq 1 ] || [ "$d_subnet_exists" -eq 1 ]; then
+                        should_delete=1
+                    fi
                 fi
 
-                # 安全地检查键是否存在于关联数组中，以兼容 set -u
-                # ${array[key]+_} 当键存在时会扩展为 _, 否则为空
-                local s_subnet_exists=0
-                local d_subnet_exists=0
-                if [ -n "$s_subnet_val" ] && [[ ${script_subnets[$s_subnet_val]+_} ]]; then
-                    s_subnet_exists=1
-                fi
-                if [ -n "$d_subnet_val" ] && [[ ${script_subnets[$d_subnet_val]+_} ]]; then
-                    d_subnet_exists=1
+                # 检查 MASQUERADE 规则 (在 nat 表中)
+                if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j MASQUERADE"* && "$chain_name" == "POSTROUTING" ]]; then
+                    local s_subnet_val=""
+                    if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
+                        s_subnet_val="${BASH_REMATCH[1]}"
+                    fi
+                    if [ -n "$s_subnet_val" ] && [ -n "${script_subnets[$s_subnet_val]}" ]; then
+                        should_delete=1
+                    fi
                 fi
 
-                if [ "$s_subnet_exists" -eq 1 ] || [ "$d_subnet_exists" -eq 1 ]; then
-                    should_delete=1
-                fi
-            fi
-
-            # 检查 MASQUERADE 规则 (在 nat 表中)
-            if [ "$current_table" == "nat" ] && [[ "$rule_spec" == *"-j MASQUERADE"* && "$chain_name" == "POSTROUTING" ]]; then
-                local s_subnet_val=""
-                if [[ "$rule_spec" =~ -s[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+) ]]; then
-                    s_subnet_val="${BASH_REMATCH[1]}"
-                fi
-                if [ -n "$s_subnet_val" ] && [ -n "${script_subnets[$s_subnet_val]}" ]; then
-                    should_delete=1
-                fi
-            fi
-
-            if [ "$should_delete" -eq 1 ]; then
-                log "INFO" "     - 删除规则 from $current_table/$chain_name: $rule_spec"
-                if ! $SUDO iptables -t "$current_table" -D "$chain_name" $rule_spec >/dev/null 2>&1; then
-                    log "WARNING" "       - 删除规则失败 (可能已不存在或规则稍有不同): $SUDO iptables -t $current_table -D $chain_name $rule_spec"
+                if [ "$should_delete" -eq 1 ]; then
+                    log "INFO" "     - 删除规则 from $current_table/$chain_name: $rule_spec"
+                    if ! $SUDO iptables -t "$current_table" -D "$chain_name" $rule_spec >/dev/null 2>&1; then
+                        log "WARNING" "       - 删除规则失败 (可能已不存在或规则稍有不同): $SUDO iptables -t $current_table -D $chain_name $rule_spec"
+                    fi
                 fi
             fi
-        fi
-    done < <($SUDO iptables-save)
-
-    log "INFO" "   ✅ 旧的iptables规则已清理 (基于现有nsX实例检测)。"
-    
-    # 3. 杀死所有残留的转发进程
-    log "INFO" "   - 步骤3: 停止所有残留的转发进程..."
-    
-    # 精确匹配脚本启动的socat进程
-    SOCAT_PATTERN="socat TCP4-LISTEN:[0-9]+,fork,reuseaddr TCP4:127.0.0.1:[0-9]+"
-    if pgrep -f "$SOCAT_PATTERN" >/dev/null; then
-        log "INFO" "     - 停止所有匹配的socat进程..."
-        $SUDO pkill -f "$SOCAT_PATTERN" || true
-        sleep 1
+        done < <($SUDO iptables-save)
+        log "INFO" "   ✅ 旧的iptables规则已清理。"
+    else
+        log "INFO" "   - 未发现由脚本管理的命名空间，跳过iptables规则清理。"
     fi
-    log "INFO" "   ✅ 转发进程清理完成。"
+
+    # 3. 清理所有网络命名空间、挂载点、进程、veth设备和DNS配置
+    log "INFO" "   - 步骤3: 清理网络命名空间及相关资源..."
+    if [ ${#existing_ns_names[@]} -gt 0 ]; then
+        for NS_NAME in "${existing_ns_names[@]}"; do
+            log "INFO" "     - 正在清理命名空间 $NS_NAME..."
+            local idx=${NS_NAME#ns}
+            
+            log "INFO" "       - 卸载绑定挂载..."
+            $SUDO ip netns exec "$NS_NAME" sh -c '
+                WARP_SYSTEM_CONFIG_DIR="/var/lib/cloudflare-warp"
+                WARP_SYSTEM_IPC_DIR="/run/cloudflare-warp"
+                if mount | grep -q "on $WARP_SYSTEM_CONFIG_DIR type"; then umount "$WARP_SYSTEM_CONFIG_DIR" || true; fi
+                if mount | grep -q "on $WARP_SYSTEM_IPC_DIR type"; then umount "$WARP_SYSTEM_IPC_DIR" || true; fi
+            '
+            
+            log "INFO" "       - 停止 $NS_NAME 内的所有进程..."
+            if pids=$($SUDO ip netns pids "$NS_NAME" 2>/dev/null); then
+                [ -n "$pids" ] && $SUDO kill -9 $pids >/dev/null 2>&1 || true
+            fi
+            sleep 1
+            
+            log "INFO" "       - 删除命名空间 $NS_NAME..."
+            $SUDO ip netns del "$NS_NAME" >/dev/null 2>&1 || true
+            
+            local VETH_HOST="veth$idx"
+            if ip link show "$VETH_HOST" &> /dev/null; then
+                log "INFO" "     - 删除 veth 设备 $VETH_HOST..."
+                $SUDO ip link del "$VETH_HOST" >/dev/null 2>&1 || true
+            fi
+            
+            if [ -d "/etc/netns/$NS_NAME" ]; then
+                log "INFO" "     - 删除DNS配置 /etc/netns/$NS_NAME..."
+                $SUDO rm -rf "/etc/netns/$NS_NAME" >/dev/null 2>&1 || true
+            fi
+            
+            local INSTANCE_CONFIG_DIR="${WARP_CONFIG_BASE_DIR}/${NS_NAME}"
+            if [ -d "$INSTANCE_CONFIG_DIR" ]; then
+                log "INFO" "     - 删除独立的WARP配置目录 $INSTANCE_CONFIG_DIR..."
+                $SUDO rm -rf "$INSTANCE_CONFIG_DIR" >/dev/null 2>&1 || true
+            fi
+            
+            local INSTANCE_IPC_DIR="${WARP_IPC_BASE_DIR}/${NS_NAME}"
+            if [ -d "$INSTANCE_IPC_DIR" ]; then
+                log "INFO" "     - 删除独立的WARP IPC目录 $INSTANCE_IPC_DIR..."
+                $SUDO rm -rf "$INSTANCE_IPC_DIR" >/dev/null 2>&1 || true
+            fi
+        done
+        log "INFO" "   ✅ 网络命名空间、veth设备及相关配置已清理。"
+    else
+        log "INFO" "   - 未发现需要清理的命名空间。"
+    fi
+
+    # 4. 杀死所有残留的转发进程
+    log "INFO" "   - 步骤4: 停止所有残留的转发进程..."
+    log "INFO" "   ✅ 转发进程清理完成 (socat已移除)。"
     
-    # 4. 清理锁文件
-    log "INFO" "   - 步骤4: 清理锁文件..."
+    # 5. 清理锁文件
+    log "INFO" "   - 步骤5: 清理锁文件..."
     rm -f "$LOCK_FILE" >/dev/null 2>&1 || true
     log "INFO" "   ✅ 锁文件已清理。"
     
     log "INFO" "✅ 彻底清理完成。"
+}
+
+# 在全局命名空间中注册WARP (如果尚未注册)
+register_warp_globally() {
+    log "INFO" "🌐 检查全局WARP注册状态..."
+    # WARP的注册文件路径
+    local reg_file="/var/lib/cloudflare-warp/reg.json"
+
+    # 检查注册文件是否存在且内容不为空
+    if [ -s "$reg_file" ]; then
+        log "INFO" "   ✅ 全局WARP注册文件已存在 ($reg_file)，跳过注册。"
+        return 0
+    fi
+
+    log "INFO" "   - 全局WARP未注册，开始注册流程..."
+    # 确保cloudflare-warp目录存在且权限正确
+    $SUDO mkdir -p /var/lib/cloudflare-warp
+    $SUDO chmod 700 /var/lib/cloudflare-warp
+
+    # 循环尝试注册，因为网络问题可能导致失败
+    for attempt in {1..5}; do
+        log "INFO" "     - 尝试注册 (第 $attempt 次)..."
+        # 执行注册命令，接受服务条款
+        if $SUDO warp-cli --accept-tos register; then
+            log "INFO" "   ✅ 全局WARP注册成功！"
+            # 成功后，设置模式为warp，然后断开连接，以防影响主机网络
+            log "INFO" "   - 设置模式为 WARP 并断开连接..."
+            $SUDO warp-cli set-mode warp >/dev/null 2>&1 || log "WARNING" "设置模式失败"
+            $SUDO warp-cli disconnect >/dev/null 2>&1 || log "WARNING" "断开连接失败"
+            return 0
+        fi
+        log "WARNING" "     - 注册失败，等待5秒后重试..."
+        sleep 5
+    done
+
+    log "ERROR" "   ❌ 经过多次尝试后，全局WARP注册失败。请检查主机网络环境和Cloudflare服务状态。"
+    exit 1
 }
 
 # 计算MTU值
@@ -395,26 +407,14 @@ init_warp_instance() {
         done
         log "INFO" "     ✅ WARP服务IPC Socket已就绪。"
         
-        # 尝试注册WARP
-        log "INFO" "     - 注册WARP并接受服务条款..."
-        for attempt in {1..5}; do
-            if warp-cli --accept-tos registration new >/dev/null 2>&1; then
-                log "INFO" "     ✅ WARP新注册成功 (尝试 $attempt)。"
-                break
-            elif warp-cli --accept-tos status | grep -q "Status: Registered"; then
-                log "INFO" "     ℹ️  WARP已注册 (尝试 $attempt)。"
-                break
-            fi
-            
-            if [ $attempt -eq 5 ]; then
-                log "ERROR" "注册WARP失败。请检查网络连接。"
-                warp-cli --accept-tos status
-                exit 1
-            fi
-            
-            log "WARNING" "     ⚠️  注册失败，等待重试 (尝试 $attempt/5)..."
-            sleep $((attempt * 2))
-        done
+        # 由于已在全局注册，此处不再需要注册逻辑
+        # 检查状态以确认服务是否正常
+        if ! warp-cli --accept-tos status | grep -q "Status: Disconnected"; then
+             log "WARNING" "     - WARP 初始状态不是 Disconnected，可能存在问题。尝试继续..."
+             warp-cli --accept-tos status
+        else
+             log "INFO" "     ✅ WARP 初始状态为 Disconnected，符合预期。"
+        fi
         
         # 设置代理模式
         log "INFO" "     - 设置WARP为SOCKS5代理模式..."
@@ -588,31 +588,25 @@ create_pool() {
             
             # 初始化WARP实例
             WARP_INTERNAL_PORT=$((40000 + i))
-            SOCAT_LISTEN_PORT=$((40001 + i))
             
             init_warp_instance "$NS_NAME" "$i" "$WARP_INTERNAL_PORT"
             
-            # 启动socat端口转发
-            $SUDO ip netns exec "$NS_NAME" bash -c "
-                nohup socat TCP4-LISTEN:$SOCAT_LISTEN_PORT,fork,reuseaddr TCP4:127.0.0.1:$WARP_INTERNAL_PORT >/dev/null 2>&1 &
-                echo \$! > $INSTANCE_IPC_DIR/socat.pid
-            " || { log "ERROR" "在 $NS_NAME 中启动socat失败。"; exit 1; }
+            # socat 已被移除，直接使用 iptables 转发到 WARP 的内部端口
             
             # 创建端口映射
             HOST_PORT=$((BASE_PORT + i))
-            log "INFO" "   - 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$SOCAT_LISTEN_PORT..."
+            log "INFO" "   - 创建端口映射 主机端口 $HOST_PORT -> $NAMESPACE_IP:$WARP_INTERNAL_PORT..."
             
             # 为外部流量创建DNAT规则
-            if ! $SUDO iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                $SUDO iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || \
+            if ! $SUDO iptables -t nat -C PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT &> /dev/null; then
+                $SUDO iptables -t nat -I PREROUTING -p tcp --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT || \
                     { log "ERROR" "创建PREROUTING DNAT规则失败。"; exit 1; }
             fi
             
             # 为本机流量创建DNAT规则 (先清空以确保幂等性)
-            log "INFO" "   - 刷新 nat OUTPUT 链以确保规则纯净..."
-            $SUDO iptables -t nat -F OUTPUT
-            if ! $SUDO iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT &> /dev/null; then
-                $SUDO iptables -t nat -I OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$SOCAT_LISTEN_PORT || \
+            log "INFO" "   - 为本机流量 (127.0.0.1) 创建 OUTPUT 规则..."
+            if ! $SUDO iptables -t nat -C OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT &> /dev/null; then
+                $SUDO iptables -t nat -I OUTPUT -p tcp -d 127.0.0.1 --dport $HOST_PORT -j DNAT --to-destination $NAMESPACE_IP:$WARP_INTERNAL_PORT || \
                     { log "ERROR" "创建OUTPUT DNAT规则失败。"; exit 1; }
             fi
             
@@ -632,6 +626,36 @@ create_pool() {
     log "INFO" "每个实例的SOCKS5代理端口从 $BASE_PORT 开始递增。"
 }
 
+# 生成JSON配置文件
+generate_config_json() {
+    log "INFO" "📄 开始生成 warp_pool_config.json 配置文件..."
+    local json_file="warp_pool_config.json"
+    local json_content="["
+
+    for i in $(seq 0 $(($POOL_SIZE-1))); do
+        local id=$i
+        local namespace="ns$i"
+        local port=$((BASE_PORT + i))
+
+        # 构建JSON对象
+        local instance_json
+        instance_json=$(printf '{"id": %d, "namespace": "%s", "port": %d}' "$id" "$namespace" "$port")
+
+        # 追加到JSON内容
+        if [ "$i" -gt 0 ]; then
+            json_content="$json_content,"
+        fi
+        json_content="$json_content$instance_json"
+    done
+
+    json_content="$json_content]"
+
+    # 写入文件
+    # 不需要sudo，因为是在当前用户目录下创建文件
+    echo "$json_content" > "$json_file"
+    log "INFO" "✅ 配置文件已成功生成: $json_file"
+}
+
 # --- 主逻辑 ---
 main() {
     log "INFO" "🚀 开始执行 WARP 代理池创建脚本..."
@@ -643,9 +667,15 @@ main() {
     
     # 首先执行清理，确保环境干净
     cleanup
+
+    # 全局注册WARP
+    register_warp_globally
     
     # 然后创建新的代理池
     create_pool
+    
+    # 生成配置文件
+    generate_config_json
     
     log "INFO" "🎉🎉🎉 脚本执行完毕！"
     log "INFO" "查看日志: $LOG_FILE"
