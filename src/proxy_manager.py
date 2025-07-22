@@ -59,7 +59,7 @@ REP_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 
 
 # --- 后端 WARP 代理池配置 ---
-WARP_POOL_CONFIG_FILE = 'warp_pool_config.json'
+WARP_POOL_CONFIG_FILE = 'src/warp_pool_config.json'
 WARP_POOL_CONFIG = {} # 将以端口为键，存储 { "id": ..., "namespace": ... }
 WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
 IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
@@ -128,41 +128,22 @@ def refresh_proxy_ip(backend_warp_port):
     
     ns_name = instance_config['namespace']
     
-    logging.info(f"正在尝试为端口 {backend_warp_port} (命名空间 {ns_name}) 刷新IP...")
-    try:
-        # 优先尝试断开重连
-        logging.info(f"正在断开 {ns_name} 中的WARP连接...")
-        subprocess.run(
-            f"sudo ip netns exec {ns_name} warp-cli disconnect",
-            shell=True, check=True, timeout=20
-        )
-        logging.info(f"正在重新连接 {ns_name} 中的WARP...")
-        subprocess.run(
-            f"sudo ip netns exec {ns_name} warp-cli connect",
-            shell=True, check=True, timeout=20
-        )
-        logging.info(f"{ns_name} 中的WARP已重新连接。")
-        
-        logging.info(f"等待 {IP_REFRESH_WAIT} 秒，让 {ns_name} (端口 {backend_warp_port}) 的IP稳定...")
-        time.sleep(IP_REFRESH_WAIT)
-        logging.info(f"端口 {backend_warp_port} ({ns_name}) 的IP地址已刷新。")
-        return True
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
-        logging.warning(f"{ns_name} 的断开重连操作失败: {e}。正在尝试重启 warp-svc 服务...")
-        try:
-            # 如果断开重连失败，尝试重启服务
-            subprocess.run(f"sudo ip netns exec {ns_name} pkill warp-svc", shell=True, check=True, timeout=10)
-            time.sleep(2)
-            subprocess.run(f"sudo ip netns exec {ns_name} warp-svc", shell=True, check=True, timeout=10)
-            time.sleep(IP_REFRESH_WAIT)
-            logging.info(f"成功重启 {ns_name} 中的 warp-svc 服务。")
-            return True
-        except Exception as e_restart:
-            logging.error(f"重启 {ns_name} 中的 warp-svc 服务失败: {e_restart}")
-            return False
-    except Exception as e:
-        logging.error(f"为端口 {backend_warp_port} ({ns_name}) 刷新IP时发生未知错误: {str(e)}")
-        return False
+    logging.info(f"为端口 {backend_warp_port} (命名空间 {ns_name}) 请求IP刷新。")
+    
+    # 移除了直接的 sudo 调用。IP刷新现在应该由一个外部的、有权限的脚本处理，
+    # 例如 'manage_pool.sh'。这里我们只记录这个意图。
+    logging.info(f"模拟IP刷新: 记录需要为命名空间 {ns_name} 刷新IP的事件。")
+    logging.warning(f"IP刷新逻辑已更改: 不再直接调用 'sudo'。请确保外部机制 (如 manage_pool.sh) "
+                    f"正在监控并处理IP刷新请求。")
+
+    # 假设外部脚本需要一些时间来完成刷新
+    logging.info(f"等待 {IP_REFRESH_WAIT} 秒，模拟外部脚本执行IP刷新...")
+    time.sleep(IP_REFRESH_WAIT)
+    
+    logging.info(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新流程已（模拟）完成。")
+    # 总是返回 True，因为实际的成功/失败取决于外部脚本。
+    # 后续的 validate_proxy 步骤将是真正的守门员。
+    return True
 
 def _refresh_and_return_task(port_to_refresh):
     """
@@ -187,9 +168,11 @@ def _refresh_and_return_task(port_to_refresh):
             available_proxies.put(port_to_refresh)
         logging.info(f"后台任务: 后端端口 {port_to_refresh} 验证成功，已返回可用代理池。")
     else:
-        # 如果验证失败，我们暂时不将其放回池中，而是记录一个严重警告。
-        # 在更复杂的系统中，可以将其放入一个隔离区或安排稍后重试。
-        logging.critical(f"后台任务: 严重 - 后端端口 {port_to_refresh} 在IP刷新后未能通过验证，已被隔离，不会返回代理池。")
+        # 如果验证失败，将代理端口重新放回队列的末尾，并记录错误。
+        # 这可以防止代理池因暂时的网络问题而耗尽。
+        logging.warning(f"后台任务: 后端端口 {port_to_refresh} 在IP刷新后未能通过验证。将端口放回队列末尾以供后续重试。")
+        with proxy_lock:
+            available_proxies.put(port_to_refresh)
 
 # --- API 认证装饰器 ---
 def require_token(f):

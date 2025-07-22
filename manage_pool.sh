@@ -28,7 +28,8 @@ CONFIG_BASE_DIR="/var/lib/warp-configs"  # WARP配置目录
 IPC_BASE_DIR="/run/warp-sockets"         # WARP IPC目录
 LOG_FILE="/var/log/warp-pool.log"        # 日志文件路径
 LOCK_FILE="/tmp/warp_pool_$(id -u).lock" # 用户隔离的锁文件
-PID_FILE="/tmp/proxy_manager.pid"        # API服务进程ID文件
+PID_FILE="/tmp/proxy_manager_$(id -u).pid" # 用户隔离的API服务进程ID文件
+WARP_POOL_CONFIG_FILE="${SCRIPT_DIR}/src/warp_pool_config.json" # WARP池配置文件
 
 # Python应用配置
 VENV_DIR="${SCRIPT_DIR}/.venv"
@@ -142,13 +143,18 @@ cleanup_iptables() {
 cleanup_resources() {
     log "INFO" "🧹 开始全面清理网络资源..."
 
-    # 1. 清理iptables
+    # 1. 清理配置文件
+    log "INFO" "   - 清理 ${WARP_POOL_CONFIG_FILE}..."
+    $SUDO rm -f "$WARP_POOL_CONFIG_FILE"
+    log "INFO" "   ✅ 配置文件已清理。"
+
+    # 2. 清理iptables
     cleanup_iptables
 
-    # 2. 清理网络命名空间及相关资源
+    # 3. 清理网络命名空间及相关资源
     log "INFO" "   - 清理网络命名空间、veth设备和配置文件..."
     local existing_ns
-    existing_ns=$($SUDO ip netns list | awk '{print $1}' | grep '^ns[0-9]\+') || true
+    existing_ns=$($SUDO ip netns list | awk '{print $1}' | grep -E '^ns[0-9]+$') || true
     
     if [ -z "$existing_ns" ]; then
         log "INFO" "   - 未发现需要清理的网络命名空间。"
@@ -157,6 +163,15 @@ cleanup_resources() {
             log "INFO" "     - 正在清理命名空间 $ns_name..."
             local idx=${ns_name#ns}
             
+            # 停止并清理WARP进程PID文件
+            local warp_pid_file="${CONFIG_BASE_DIR}/${ns_name}/warp.pid"
+            if $SUDO [ -f "$warp_pid_file" ]; then
+                local warp_pid=$($SUDO cat "$warp_pid_file")
+                log "INFO" "     - 停止命名空间 $ns_name 中的WARP进程 (PID: $warp_pid)..."
+                $SUDO kill -9 "$warp_pid" >/dev/null 2>&1 || true
+                $SUDO rm -f "$warp_pid_file"
+            fi
+
             # 卸载绑定挂载
             $SUDO ip netns exec "$ns_name" sh -c '
                 umount /var/lib/cloudflare-warp &>/dev/null || true
@@ -231,7 +246,10 @@ start_api() {
     
     if [ "$1" = true ]; then # 前台运行
         log "INFO" "   - 在前台启动API服务..."
-        exec "$venv_python" "$PROXY_MANAGER_SCRIPT"
+        log "INFO" "   - 在前台启动API服务..."
+        # 不使用exec，以便trap可以捕获信号
+        # 直接执行，使脚本在前台运行，允许trap捕获Ctrl+C
+        "$venv_python" "$PROXY_MANAGER_SCRIPT"
     else # 后台运行
         log "INFO" "   - 在后台启动API服务..."
         nohup "$venv_python" "$PROXY_MANAGER_SCRIPT" > "$LOG_FILE" 2>&1 &
@@ -281,7 +299,7 @@ check_dependencies() {
 
 register_warp_globally() {
     log "INFO" "🌐 检查全局WARP注册状态..."
-    if [ -s "/var/lib/cloudflare-warp/reg.json" ]; then
+    if $SUDO [ -s "/var/lib/cloudflare-warp/reg.json" ]; then
         log "INFO" "   ✅ 全局WARP已注册。"
         return 0
     fi
@@ -306,59 +324,77 @@ init_warp_instance() {
     local ns_name=$1
     local idx=$2
     local warp_internal_port=$3
-    
+    local warp_license_key=$4
+    local warp_endpoint=$5
+
     log "INFO" "     - 在 $ns_name 中初始化WARP..."
+    # 将日志重定向到特定于命名空间的文件以避免交错
+    local ns_log_file="${LOG_FILE}.${ns_name}"
+    $SUDO touch "$ns_log_file"
+    $SUDO chmod 666 "$ns_log_file"
+
     $SUDO ip netns exec "$ns_name" bash -c '
         set -euo pipefail
+        # 将所有输出重定向到命名空间日志文件
+        exec &> >(tee -a "$6")
+
         # 从父脚本继承变量
         ns_name=$1; idx=$2; warp_internal_port=$3;
-        warp_license_key=$4; warp_endpoint=$5; log_file=$6
+        warp_license_key=$4; warp_endpoint=$5;
 
-        log_ns() {
-            printf "[%s] [%s] [%s] %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$1" "$ns_name" "$2" >> "$log_file"
-        }
+        echo "--- WARP 初始化开始于 $(date) ---"
 
-        log_ns "INFO" "启动WARP守护进程..."
+        echo "INFO: 启动WARP守护进程..."
         nohup warp-svc >/dev/null 2>&1 &
+        local warp_pid=$!
+        echo "$warp_pid" > /var/lib/cloudflare-warp/warp.pid
+        echo "INFO: WARP守护进程已启动 (PID: $warp_pid)"
         sleep 5
 
         for i in {1..10}; do
             if test -S /run/cloudflare-warp/warp_service; then break; fi
-            log_ns "INFO" "等待WARP服务就绪... ($i/10)"
+            echo "INFO: 等待WARP服务就绪... ($i/10)"
             sleep 2
         done
         if ! test -S /run/cloudflare-warp/warp_service; then
-            log_ns "ERROR" "等待WARP服务超时。"
+            echo "ERROR: 等待WARP服务超时。"
             exit 1
         fi
         
-        log_ns "INFO" "设置代理模式并连接..."
+        echo "INFO: 设置代理模式并连接..."
         warp-cli --accept-tos set-mode proxy
         warp-cli --accept-tos proxy port "$warp_internal_port"
         [ -n "$warp_license_key" ] && warp-cli --accept-tos registration license "$warp_license_key"
         [ -n "$warp_endpoint" ] && warp-cli --accept-tos tunnel endpoint set "$warp_endpoint"
-        warp-cli --accept-tos connect
+        
+        echo "INFO: 尝试连接WARP..."
+        if ! timeout 30s warp-cli --accept-tos connect; then
+            echo "ERROR: warp-cli connect 命令执行超时或失败。"
+            exit 1
+        fi
 
         for i in {1..15}; do
-            if warp-cli --accept-tos status | grep -q "Status: Connected"; then
-                log_ns "INFO" "WARP连接成功！"
+            status_output=$(warp-cli --accept-tos status)
+            if echo "$status_output" | grep -q "Status: Connected"; then
+                echo "INFO: WARP连接成功！"
+                echo "$status_output"
                 exit 0
             fi
-            log_ns "INFO" "等待WARP连接... ($i/15)"
+            echo "INFO: 等待WARP连接... ($i/15)"
             sleep 2
         done
         
-        log_ns "ERROR" "连接WARP超时。"
+        echo "ERROR: 连接WARP超时。"
         warp-cli --accept-tos status
         exit 1
-    ' bash "$ns_name" "$idx" "$warp_internal_port" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT" "$LOG_FILE"
+    ' bash "$ns_name" "$idx" "$warp_internal_port" "$warp_license_key" "$warp_endpoint" "$ns_log_file"
 }
 
 create_pool() {
     log "INFO" "🚀 开始创建 WARP 代理池 (大小: $POOL_SIZE)..."
     
     check_dependencies
-    register_warp_globally
+    register_warp_globally || { log "ERROR" "WARP全局注册失败，中止操作。"; return 1; }
 
     $SUDO sysctl -w net.ipv4.ip_forward=1 >/dev/null
     $SUDO sh -c "echo 1 > /proc/sys/net/ipv4/conf/all/route_localnet"
@@ -366,61 +402,89 @@ create_pool() {
     setup_iptables_chains
 
     for i in $(seq 0 $(($POOL_SIZE-1))); do
-        (
-            $SUDO flock -x 200 # 使用文件描述符200进行锁定
-            
-            local ns_name="ns$i"
-            log "INFO" "✨ 正在创建 WARP 实例 $i (命名空间: $ns_name)..."
-            
-            # 网络配置 (使用 /256 和 %256 来确保每个实例都有唯一的 /24 子网)
-            local subnet_third=$((i / 256))
-            local subnet_fourth=$((i % 256))
-            local gateway_ip="10.${subnet_third}.${subnet_fourth}.1"
-            local namespace_ip="10.${subnet_third}.${subnet_fourth}.2"
-            local subnet="${gateway_ip%.*}.0/24"
-            local veth_host="veth$i"
-            local veth_ns="veth${i}-ns"
-            
-            # 创建命名空间和veth
-            $SUDO ip netns add "$ns_name"
-            $SUDO ip link add "$veth_host" type veth peer name "$veth_ns"
-            $SUDO ip link set "$veth_ns" netns "$ns_name"
-            $SUDO ip addr add "$gateway_ip/24" dev "$veth_host"
-            $SUDO ip link set "$veth_host" up
-            
-            # 配置命名空间内部网络
-            $SUDO ip netns exec "$ns_name" ip addr add "$namespace_ip/24" dev "$veth_ns"
-            $SUDO ip netns exec "$ns_name" ip link set lo up
-            $SUDO ip netns exec "$ns_name" ip link set "$veth_ns" up
-            $SUDO ip netns exec "$ns_name" ip route add default via "$gateway_ip"
+        local ns_name="ns$i"
+        log "INFO" "✨ 正在创建 WARP 实例 $i (命名空间: $ns_name)..."
+        
+        # 网络配置 (使用 /256 和 %256 来确保每个实例都有唯一的 /24 子网)
+        local subnet_third=$((i / 256))
+        local subnet_fourth=$((i % 256))
+        local gateway_ip="10.${subnet_third}.${subnet_fourth}.1"
+        local namespace_ip="10.${subnet_third}.${subnet_fourth}.2"
+        local subnet="${gateway_ip%.*}.0/24"
+        local veth_host="veth$i"
+        local veth_ns="veth${i}-ns"
+        
+        # 创建命名空间和veth
+        $SUDO ip netns add "$ns_name"
+        $SUDO ip link add "$veth_host" type veth peer name "$veth_ns"
+        $SUDO ip link set "$veth_ns" netns "$ns_name"
+        $SUDO ip addr add "$gateway_ip/24" dev "$veth_host"
+        $SUDO ip link set "$veth_host" up
+        
+        # 配置命名空间内部网络
+        $SUDO ip netns exec "$ns_name" ip addr add "$namespace_ip/24" dev "$veth_ns"
+        $SUDO ip netns exec "$ns_name" ip link set lo up
+        $SUDO ip netns exec "$ns_name" ip link set "$veth_ns" up
+        $SUDO ip netns exec "$ns_name" ip route add default via "$gateway_ip"
 
-            # 绑定配置目录
-            $SUDO mkdir -p "${CONFIG_BASE_DIR}/${ns_name}" "${IPC_BASE_DIR}/${ns_name}"
-            $SUDO ip netns exec "$ns_name" mkdir -p /var/lib/cloudflare-warp /run/cloudflare-warp
-            $SUDO ip netns exec "$ns_name" mount --bind "${CONFIG_BASE_DIR}/${ns_name}" /var/lib/cloudflare-warp
-            $SUDO ip netns exec "$ns_name" mount --bind "${IPC_BASE_DIR}/${ns_name}" /run/cloudflare-warp
+        # 绑定配置目录
+        $SUDO mkdir -p "${CONFIG_BASE_DIR}/${ns_name}" "${IPC_BASE_DIR}/${ns_name}"
+        $SUDO ip netns exec "$ns_name" mkdir -p /var/lib/cloudflare-warp /run/cloudflare-warp
+        $SUDO ip netns exec "$ns_name" mount --bind "${CONFIG_BASE_DIR}/${ns_name}" /var/lib/cloudflare-warp
+        $SUDO ip netns exec "$ns_name" mount --bind "${IPC_BASE_DIR}/${ns_name}" /run/cloudflare-warp
 
-            # 初始化WARP
-            local warp_internal_port=$((40000 + i))
-            init_warp_instance "$ns_name" "$i" "$warp_internal_port"
+        # 初始化WARP
+        local warp_internal_port=$((40000 + i))
+        if ! init_warp_instance "$ns_name" "$i" "$warp_internal_port" "$WARP_LICENSE_KEY" "$WARP_ENDPOINT"; then
+            log "ERROR" "WARP实例 $ns_name 初始化失败。中止代理池创建。"
+            return 1
+        fi
 
-            # 配置iptables规则
-            local host_port=$((BASE_PORT + i))
-            local comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-DNAT-$host_port\""
+        # 配置iptables规则
+        local host_port=$((BASE_PORT + i))
+        local comment_args="-m comment --comment ${IPTABLES_COMMENT_PREFIX}-DNAT-$host_port"
+        # 检查规则是否存在，不存在则添加
+        if ! $SUDO iptables -t nat -C "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
             $SUDO iptables -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
+        fi
+        if ! $SUDO iptables -t nat -C "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
             $SUDO iptables -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
-            
-            comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-FWD-$subnet\""
+        fi
+        
+        comment_args="-m comment --comment ${IPTABLES_COMMENT_PREFIX}-FWD-$subnet"
+        if ! $SUDO iptables -C "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args 2>/dev/null; then
             $SUDO iptables -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args
+        fi
+        if ! $SUDO iptables -C "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args 2>/dev/null; then
             $SUDO iptables -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args
-            
-            comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-MASQ-$subnet\""
+        fi
+        
+        comment_args="-m comment --comment ${IPTABLES_COMMENT_PREFIX}-MASQ-$subnet"
+        if ! $SUDO iptables -t nat -C "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args 2>/dev/null; then
             $SUDO iptables -t nat -A "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args
+        fi
 
-            log "INFO" "✅ 实例 $i 创建成功，代理监听在 127.0.0.1:$host_port"
-        ) 200>"$LOCK_FILE"
+        log "INFO" "✅ 实例 $i 创建成功，代理监听在 127.0.0.1:$host_port"
     done
     log "INFO" "✅✅✅ WARP 代理池创建完成！"
+
+    # --- 生成 warp_pool_config.json ---
+    log "INFO" "📝 生成 ${WARP_POOL_CONFIG_FILE}..."
+    local json_content="["
+    for i in $(seq 0 $(($POOL_SIZE-1))); do
+        local ns_name="ns$i"
+        local host_port=$((BASE_PORT + i))
+        
+        if [ "$i" -gt 0 ]; then
+            json_content+=","
+        fi
+        
+        json_content+=$(printf '{"id": %d, "namespace": "%s", "port": %d}' "$i" "$ns_name" "$host_port")
+    done
+    json_content+="]"
+    
+    echo "$json_content" > "$WARP_POOL_CONFIG_FILE"
+    log "INFO" "✅ ${WARP_POOL_CONFIG_FILE} 已生成。"
 }
 
 # --- 状态检查 ---
@@ -437,7 +501,7 @@ show_status() {
     # 2. 网络命名空间状态
     log "INFO" "   - 网络命名空间:"
     local ns_list
-    ns_list=$($SUDO ip netns list | awk '{print $1}' | grep '^ns[0-9]\+') || true
+    ns_list=$($SUDO ip netns list | awk '{print $1}' | grep -E '^ns[0-9]+$') || true
     if [ -z "$ns_list" ]; then
         log "INFO" "     - 未发现活动的命名空间。"
     else
@@ -455,10 +519,21 @@ show_status() {
 
 # --- 主逻辑 ---
 main() {
+    # --- 全局清理陷阱 ---
+    # 捕获SIGINT (Ctrl+C) 和 SIGTERM 信号，确保脚本中断时能清理资源
+    trap '
+        echo
+        log "WARNING" "接收到中断信号，开始执行清理..."
+        stop_api
+        cleanup_resources
+        log "WARNING" "清理完成，脚本退出。"
+        exit 130
+    ' SIGINT SIGTERM
+
     # 确保日志文件和目录存在且权限正确
     $SUDO mkdir -p "$(dirname "$LOG_FILE")"
     $SUDO touch "$LOG_FILE"
-    $SUDO chmod 644 "$LOG_FILE"
+    $SUDO chmod 666 "$LOG_FILE"
 
     # 启动sudo会话保持
     if [ -n "$SUDO" ] && $SUDO -n true 2>/dev/null; then
@@ -482,32 +557,44 @@ main() {
 
     case "$action" in
         start)
-            log "INFO" "命令: start"
-            cleanup_resources
-            create_pool
-            start_api "$foreground"
-            log "INFO" "🎉 服务启动完成。"
+            (
+                flock -x 200
+                log "INFO" "命令: start"
+                cleanup_resources
+                create_pool
+                start_api "$foreground"
+                log "INFO" "🎉 服务启动完成。"
+            ) 200>"$LOCK_FILE"
             ;;
         stop)
-            log "INFO" "命令: stop"
-            stop_api
-            cleanup_resources
-            log "INFO" "🎉 服务已停止并清理。"
+            (
+                flock -x 200
+                log "INFO" "命令: stop"
+                stop_api
+                cleanup_resources
+                log "INFO" "🎉 服务已停止并清理。"
+            ) 200>"$LOCK_FILE"
             ;;
         restart)
-            log "INFO" "命令: restart"
-            stop_api
-            cleanup_resources
-            create_pool
-            start_api "$foreground"
-            log "INFO" "🎉 服务重启完成。"
+            (
+                flock -x 200
+                log "INFO" "命令: restart"
+                stop_api
+                cleanup_resources
+                create_pool
+                start_api "$foreground"
+                log "INFO" "🎉 服务重启完成。"
+            ) 200>"$LOCK_FILE"
             ;;
         status)
             show_status
             ;;
         cleanup)
-            log "INFO" "命令: cleanup"
-            cleanup_resources
+            (
+                flock -x 200
+                log "INFO" "命令: cleanup"
+                cleanup_resources
+            ) 200>"$LOCK_FILE"
             ;;
         start-api)
             log "INFO" "命令: start-api"
