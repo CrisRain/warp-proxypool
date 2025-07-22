@@ -64,10 +64,40 @@ WARP_POOL_CONFIG = {} # 将以端口为键，存储 { "id": ..., "namespace": ..
 WARP_INSTANCE_IP = '127.0.0.1' # 后端WARP实例监听本地地址，供管理器连接
 IP_REFRESH_WAIT = 5  # IP刷新后的等待时间(秒)
 
+# --- 代理验证配置 ---
+PROXY_VALIDATION_TARGET_HOST = os.environ.get('PROXY_VALIDATION_TARGET_HOST', '1.1.1.1')
+PROXY_VALIDATION_TARGET_PORT = int(os.environ.get('PROXY_VALIDATION_TARGET_PORT', 443))
+PROXY_VALIDATION_TIMEOUT = 10 # 验证连接的超时时间(秒)
+
 # --- 代理状态管理 ---
 available_proxies = Queue() # 存储可用的后端WARP端口 (例如: 10800, 10801)
 in_use_proxies = {} # 存储正在被使用的后端WARP端口信息 (被SOCKS或API占用)
 proxy_lock = threading.Lock() # 用于保护 available_proxies 和 in_use_proxies 的线程锁
+
+def validate_proxy(backend_warp_port):
+    """
+    通过尝试连接到一个已知目标来验证一个后端WARP代理是否真的可用。
+    返回 True 表示验证成功，False 表示失败。
+    """
+    logging.info(f"验证中: 正在测试后端端口 {backend_warp_port} 的连通性...")
+    try:
+        # 使用 PySocks 创建一个通过指定后端代理的连接
+        conn = socks.create_connection(
+            (PROXY_VALIDATION_TARGET_HOST, PROXY_VALIDATION_TARGET_PORT),
+            proxy_type=socks.SOCKS5,
+            proxy_addr=WARP_INSTANCE_IP,
+            proxy_port=backend_warp_port,
+            timeout=PROXY_VALIDATION_TIMEOUT
+        )
+        conn.close()
+        logging.info(f"验证成功: 后端端口 {backend_warp_port} 可以成功连接到 {PROXY_VALIDATION_TARGET_HOST}:{PROXY_VALIDATION_TARGET_PORT}。")
+        return True
+    except (socks.ProxyConnectionError, socket.timeout, OSError) as e:
+        logging.warning(f"验证失败: 后端端口 {backend_warp_port} 无法连接到验证目标。错误: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"验证中发生未知错误 (端口 {backend_warp_port}): {e}")
+        return False
 
 # --- 初始化代理池 (将在 main 函数中调用) ---
 def initialize_proxy_pool_from_config(config_data):
@@ -136,19 +166,30 @@ def refresh_proxy_ip(backend_warp_port):
 
 def _refresh_and_return_task(port_to_refresh):
     """
-    在后台线程中刷新一个后端WARP代理的IP，并将其返回到可用代理池。
+    在后台线程中刷新一个后端WARP代理的IP，验证其可用性，然后将其返回到可用代理池。
     'port_to_refresh' 是一个后端WARP端口 (例如: 10800)。
     """
     logging.info(f"后台任务: 开始为后端端口 {port_to_refresh} 刷新IP...")
     refreshed_successfully = refresh_proxy_ip(port_to_refresh)
     
-    with proxy_lock:
-        available_proxies.put(port_to_refresh)
+    if not refreshed_successfully:
+        logging.warning(f"后台任务: IP刷新失败，将端口 {port_to_refresh} 直接返回代理池以供后续重试。")
+        with proxy_lock:
+            available_proxies.put(port_to_refresh)
+        return
+
+    # IP刷新成功后，进行验证
+    logging.info(f"后台任务: IP刷新成功，现在开始验证端口 {port_to_refresh} 的可用性。")
+    is_valid = validate_proxy(port_to_refresh)
     
-    if refreshed_successfully:
-        logging.info(f"后台任务: 后端端口 {port_to_refresh} 在成功刷新IP后已返回代理池。")
+    if is_valid:
+        with proxy_lock:
+            available_proxies.put(port_to_refresh)
+        logging.info(f"后台任务: 后端端口 {port_to_refresh} 验证成功，已返回可用代理池。")
     else:
-        logging.warning(f"后台任务: 后端端口 {port_to_refresh} 已返回代理池 (IP刷新失败或被跳过)。")
+        # 如果验证失败，我们暂时不将其放回池中，而是记录一个严重警告。
+        # 在更复杂的系统中，可以将其放入一个隔离区或安排稍后重试。
+        logging.critical(f"后台任务: 严重 - 后端端口 {port_to_refresh} 在IP刷新后未能通过验证，已被隔离，不会返回代理池。")
 
 # --- API 认证装饰器 ---
 def require_token(f):
