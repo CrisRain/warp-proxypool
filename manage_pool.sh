@@ -346,7 +346,7 @@ register_warp_globally() {
     log "INFO" "   - 全局WARP未注册，开始注册..."
     "${SUDO_CMD[@]}" mkdir -p /var/lib/cloudflare-warp && "${SUDO_CMD[@]}" chmod 700 /var/lib/cloudflare-warp
     for attempt in {1..3}; do
-        if "${SUDO_CMD[@]}" warp-cli --accept-tos register; then
+        if "${SUDO_CMD[@]}" warp-cli --accept-tos registration new; then
             log "INFO" "   ✅ 全局WARP注册成功！"
             "${SUDO_CMD[@]}" warp-cli set-mode warp >/dev/null 2>&1
             "${SUDO_CMD[@]}" warp-cli disconnect >/dev/null 2>&1
