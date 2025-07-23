@@ -119,22 +119,30 @@ show_help() {
 # --- iptables 管理 ---
 setup_iptables_chains() {
     log "INFO" "创建或验证iptables自定义链..."
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -N "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -N "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -N "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -N "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
+    
+    # 检查是否在nftables模式下运行，如果是则使用兼容模式
+    local iptables_compat_flag=""
+    if [[ "$IPTABLES_CMD" == "iptables-nft" ]] || [[ "$IPTABLES_CMD" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
+        log "INFO" "检测到nftables兼容模式，将使用兼容性规则。"
+        iptables_compat_flag="--compat"
+    fi
+    
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -N "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
 
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -C PREROUTING -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -I PREROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING"
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C PREROUTING -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null; then
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I PREROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING"
     fi
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -C OUTPUT -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -I OUTPUT 1 -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT"
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C OUTPUT -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null; then
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I OUTPUT 1 -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT"
     fi
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -C POSTROUTING -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -I POSTROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING"
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C POSTROUTING -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null; then
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I POSTROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING"
     fi
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" -C FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -I FORWARD 1 -j "${IPTABLES_CHAIN_PREFIX}_FORWARD"
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -C FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null; then
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -I FORWARD 1 -j "${IPTABLES_CHAIN_PREFIX}_FORWARD"
     fi
     
     # 检查是否使用ufw，如果是则添加ufw兼容性规则
@@ -151,21 +159,28 @@ setup_iptables_chains() {
 cleanup_iptables() {
     log "INFO" "🧹 清理iptables规则..."
     
+    # 检查是否在nftables模式下运行，如果是则使用兼容模式
+    local iptables_compat_flag=""
+    if [[ "$IPTABLES_CMD" == "iptables-nft" ]] || [[ "$IPTABLES_CMD" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
+        log "INFO" "检测到nftables兼容模式，将使用兼容性规则进行清理。"
+        iptables_compat_flag="--compat"
+    fi
+    
     # 从主链中移除自定义链的引用
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D PREROUTING -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D OUTPUT -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D POSTROUTING -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -D FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D PREROUTING -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D OUTPUT -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D POSTROUTING -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -D FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
     
     # 清空并删除自定义链
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -F "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -X "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -F "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -X "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -F "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -X "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -F "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -X "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -F "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -X "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -F "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -X "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -F "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -X "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -F "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -X "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
     
     # 检查是否使用ufw，如果是则清理ufw规则
     if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
@@ -350,7 +365,12 @@ check_dependencies() {
         log "INFO" "检测到 'iptables-legacy'，将优先使用。"
         IPTABLES_CMD="iptables-legacy"
     elif command -v iptables-nft &> /dev/null; then
-        log "WARNING" "检测到系统可能使用 'nftables'。脚本的iptables规则基于 'legacy' 模式，可能需要调整。"
+        log "INFO" "检测到 'iptables-nft'，将优先使用。"
+        IPTABLES_CMD="iptables-nft"
+    else
+        # 默认使用iptables，但在nftables系统上可能需要特殊处理
+        log "INFO" "使用默认iptables命令。"
+        IPTABLES_CMD="iptables"
     fi
 
     if [[ $missing_deps -ne 0 ]]; then
@@ -381,8 +401,8 @@ register_warp_globally() {
     for attempt in {1..3}; do
         if "${SUDO_CMD[@]}" warp-cli --accept-tos registration new; then
             log "INFO" "   ✅ 全局WARP注册成功！"
-            "${SUDO_CMD[@]}" warp-cli mode warp >/dev/null 2>&1
-            "${SUDO_CMD[@]}" warp-cli disconnect >/dev/null 2>&1
+            "${SUDO_CMD[@]}" warp-cli --accept-tos mode warp >/dev/null 2>&1
+            "${SUDO_CMD[@]}" warp-cli --accept-tos disconnect >/dev/null 2>&1
             return 0
         fi
         log "WARNING" "     - 注册失败 (第 $attempt 次)，等待3秒后重试..."
@@ -445,10 +465,77 @@ init_warp_instance() {
         fi
         
         echo "INFO: 设置代理模式并连接..."
-        warp-cli --accept-tos mode proxy
-        warp-cli --accept-tos proxy port "$warp_internal_port"
-        [[ -n "$warp_license_key" ]] && warp-cli --accept-tos registration license "$warp_license_key"
-        [[ -n "$warp_endpoint" ]] && warp-cli --accept-tos tunnel endpoint set "$warp_endpoint"
+        # 增加重试机制
+        for mode_attempt in {1..3}; do
+            if warp-cli --accept-tos mode proxy; then
+                echo "INFO: 成功设置代理模式 (第 $mode_attempt 次尝试)。"
+                break
+            else
+                echo "WARNING: 设置代理模式失败 (第 $mode_attempt 次尝试)。"
+                if [[ $mode_attempt -lt 3 ]]; then
+                    echo "INFO: 等待3秒后重试..."
+                    sleep 3
+                else
+                    echo "ERROR: 设置代理模式失败，已重试3次。"
+                    exit 1
+                fi
+            fi
+        done
+        
+        # 设置代理端口
+        for port_attempt in {1..3}; do
+            if warp-cli --accept-tos proxy port "$warp_internal_port"; then
+                echo "INFO: 成功设置代理端口 $warp_internal_port (第 $port_attempt 次尝试)。"
+                break
+            else
+                echo "WARNING: 设置代理端口 $warp_internal_port 失败 (第 $port_attempt 次尝试)。"
+                if [[ $port_attempt -lt 3 ]]; then
+                    echo "INFO: 等待3秒后重试..."
+                    sleep 3
+                else
+                    echo "ERROR: 设置代理端口 $warp_internal_port 失败，已重试3次。"
+                    exit 1
+                fi
+            fi
+        done
+        
+        # 设置许可证密钥（如果提供）
+        if [[ -n "$warp_license_key" ]]; then
+            for license_attempt in {1..3}; do
+                if warp-cli --accept-tos registration license "$warp_license_key"; then
+                    echo "INFO: 成功设置许可证密钥 (第 $license_attempt 次尝试)。"
+                    break
+                else
+                    echo "WARNING: 设置许可证密钥失败 (第 $license_attempt 次尝试)。"
+                    if [[ $license_attempt -lt 3 ]]; then
+                        echo "INFO: 等待3秒后重试..."
+                        sleep 3
+                    else
+                        echo "ERROR: 设置许可证密钥失败，已重试3次。"
+                        exit 1
+                    fi
+                fi
+            done
+        fi
+        
+        # 设置端点（如果提供）
+        if [[ -n "$warp_endpoint" ]]; then
+            for endpoint_attempt in {1..3}; do
+                if warp-cli --accept-tos tunnel endpoint set "$warp_endpoint"; then
+                    echo "INFO: 成功设置端点 $warp_endpoint (第 $endpoint_attempt 次尝试)。"
+                    break
+                else
+                    echo "WARNING: 设置端点 $warp_endpoint 失败 (第 $endpoint_attempt 次尝试)。"
+                    if [[ $endpoint_attempt -lt 3 ]]; then
+                        echo "INFO: 等待3秒后重试..."
+                        sleep 3
+                    else
+                        echo "ERROR: 设置端点 $warp_endpoint 失败，已重试3次。"
+                        exit 1
+                    fi
+                fi
+            done
+        fi
         
         echo "INFO: 尝试连接WARP..."
         # 增加重试机制
@@ -586,23 +673,30 @@ create_pool() {
         # 配置iptables规则
         local host_port=$((BASE_PORT + i))
         local comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-DNAT-$host_port\""
-        # 先删除可能存在的旧规则，再添加新规则，确保幂等性
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
         
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
+        # 检查是否在nftables模式下运行，如果是则使用兼容模式
+        local iptables_compat_flag=""
+        if [[ "$IPTABLES_CMD" == "iptables-nft" ]] || [[ "$IPTABLES_CMD" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
+            iptables_compat_flag="--compat"
+        fi
+        
+        # 先删除可能存在的旧规则，再添加新规则，确保幂等性
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
+        
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
         
         comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-FWD-$subnet\""
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args
         
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args
         
         comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-MASQ-$subnet\""
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -D "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -A "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args
 
         log "INFO" "✅ 实例 $i 创建成功，代理监听在 127.0.0.1:$host_port"
     done
@@ -672,8 +766,14 @@ except Exception as e:
 
     # 3. iptables 规则状态
     log "INFO" "   - iptables 规则摘要:"
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers | grep "DNAT" | sed 's/^/     /'
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers | grep "ACCEPT" | sed 's/^/     /'
+    # 检查是否在nftables模式下运行，如果是则使用兼容模式
+    local iptables_compat_flag=""
+    if [[ "$IPTABLES_CMD" == "iptables-nft" ]] || [[ "$IPTABLES_CMD" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
+        iptables_compat_flag="--compat"
+    fi
+    
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题。"
+    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题。"
 }
 
 
