@@ -142,7 +142,7 @@ setup_iptables_chains() {
         log "INFO" "检测到ufw防火墙，添加ufw兼容性规则..."
         # 允许转发流量通过ufw
         # 注意：这需要root权限，并且可能需要用户确认
-        echo "ufw allow in on any to any port 10800:10900/tcp comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
+        echo "ufw allow 10800:10900/tcp comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
     fi
     
     log "INFO" "✅ iptables自定义链已设置。"
@@ -172,7 +172,7 @@ cleanup_iptables() {
         log "INFO" "检测到ufw防火墙，清理ufw规则..."
         # 删除之前添加的ufw规则
         # 注意：这需要root权限，并且可能需要用户确认
-        echo "ufw delete allow in on any to any port 10800:10900/tcp comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
+        echo "ufw delete allow 10800:10900/tcp comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
     fi
     
     log "INFO" "✅ iptables规则清理完成。"
