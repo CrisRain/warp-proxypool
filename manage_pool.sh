@@ -746,26 +746,42 @@ show_status() {
     else
         # 使用python解析json，更健壮
         local python_checker_code="
-import json, sys, os, subprocess
+import json, sys, os, subprocess, socket
+def check_port_connectivity(host, port, timeout=5):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, socket.error):
+        return False
+
 try:
     with open(sys.argv[1]) as f:
         proxies = json.load(f)
     for p in proxies:
         ns = p['namespace']
         port = p['port']
-        # 检查端口监听
+        # 检查端口连通性，而不是监听状态
+        # 因为实际的WARP服务在命名空间内部监听，主机上通过iptables DNAT转发
         try:
-            listen_result = subprocess.run(['ss', '-lntp'], capture_output=True, text=True, timeout=10)
-            listen_status = '✅' if f':{port}' in listen_result.stdout else '❌'
-        except (subprocess.TimeoutExpired, Exception):
+            if check_port_connectivity('127.0.0.1', port):
+                listen_status = '✅'
+            else:
+                listen_status = '❌'
+        except Exception:
             listen_status = '❌'
         
         # 检查WARP连接状态
         try:
             warp_result = subprocess.run(['sudo', 'ip', 'netns', 'exec', ns, 'warp-cli', '--accept-tos', 'status'],
                                        capture_output=True, text=True, timeout=10)
-            warp_status = '✅' if 'Status: Connected' in warp_result.stdout else '❌'
-        except (subprocess.TimeoutExpired, Exception):
+            # 检查输出中是否包含Connected状态
+            if 'Connected' in warp_result.stdout:
+                warp_status = '✅'
+            else:
+                warp_status = '❌'
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, Exception) as e:
+            # 记录具体的错误信息，便于调试
+            print(f\"     - 实例 {p['id']} ({ns}): 检查WARP状态时出错: {e}\", file=sys.stderr)
             warp_status = '❌'
             
         print(f\"     - 实例 {p['id']} ({ns}): 代理端口 127.0.0.1:{port} [监听: {listen_status}] | WARP连接 [状态: {warp_status}]\")
@@ -783,20 +799,32 @@ except Exception as e:
         iptables_compat_flag="--compat"
     fi
     
-    local prerouting_rules
-    prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || true)
-    if [[ -n "$prerouting_rules" ]]; then
+    # 增加重试机制和更详细的错误信息
+    local prerouting_rules=""
+    local forward_rules=""
+    
+    # 尝试获取PREROUTING链规则
+    if prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /') && [[ -n "$prerouting_rules" ]]; then
         echo "$prerouting_rules"
     else
-        log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题。"
+        # 如果直接获取失败，尝试不使用 --line-numbers
+        if prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n 2>/dev/null | grep "DNAT" | sed 's/^/     /') && [[ -n "$prerouting_rules" ]]; then
+            echo "$prerouting_rules"
+        else
+            log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题或规则不存在。"
+        fi
     fi
     
-    local forward_rules
-    forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || true)
-    if [[ -n "$forward_rules" ]]; then
+    # 尝试获取FORWARD链规则
+    if forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /') && [[ -n "$forward_rules" ]]; then
         echo "$forward_rules"
     else
-        log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题。"
+        # 如果直接获取失败，尝试不使用 --line-numbers
+        if forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n 2>/dev/null | grep "ACCEPT" | sed 's/^/     /') && [[ -n "$forward_rules" ]]; then
+            echo "$forward_rules"
+        else
+            log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题或规则不存在。"
+        fi
     fi
 }
 

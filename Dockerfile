@@ -31,6 +31,25 @@ RUN curl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --out
     && apt-get install -y cloudflare-warp \
     && rm -rf /var/lib/apt/lists/*
 
+# 创建WARP配置目录并设置权限
+RUN mkdir -p /var/lib/cloudflare-warp \
+    && chmod 700 /var/lib/cloudflare-warp
+
+# 创建一个脚本来自动生成WARP配置并接受服务条款
+RUN echo '#!/bin/bash\n\
+mkdir -p /var/lib/cloudflare-warp\n\
+chmod 700 /var/lib/cloudflare-warp\n\
+touch /var/lib/cloudflare-warp/reg.json\n\
+chmod 600 /var/lib/cloudflare-warp/reg.json\n\
+echo "{\n\
+  \"accept_tos\": true,\n\
+  \"tos_accepted_at\": \"$(date -Iseconds)\",\n\
+  \"effective_config\": {\n\
+    \"tos_accepted_at\": \"$(date -Iseconds)\"\n\
+  }\n\
+}" > /var/lib/cloudflare-warp/reg.json' > /usr/local/bin/setup-warp-tos.sh \
+    && chmod +x /usr/local/bin/setup-warp-tos.sh
+
 # 复制项目文件
 COPY . .
 
@@ -54,5 +73,5 @@ USER warp
 # 暴露API端口和SOCKS5端口
 EXPOSE 5000 10880
 
-# 设置默认命令
-CMD ["./manage_pool.sh", "start", "--foreground"]
+# 设置默认命令，在启动时先运行WARP服务条款设置脚本
+CMD ["/bin/bash", "-c", "setup-warp-tos.sh && ./manage_pool.sh start --foreground"]
