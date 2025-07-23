@@ -127,22 +127,40 @@ setup_iptables_chains() {
         iptables_compat_flag="--compat"
     fi
     
+    # 创建自定义链，如果已存在则忽略错误
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null || true
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null || true
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -N "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -N "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
 
+    # 添加自定义链到主链，如果已存在则忽略错误
+    # 使用 -C (check) 命令检查规则是否存在，如果不存在则添加
     if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C PREROUTING -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I PREROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING"
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I PREROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_PREROUTING" 2>/dev/null; then
+            log "ERROR" "无法将 ${IPTABLES_CHAIN_PREFIX}_PREROUTING 链添加到 PREROUTING 链。"
+            return 1
+        fi
     fi
+    
     if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C OUTPUT -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I OUTPUT 1 -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT"
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I OUTPUT 1 -j "${IPTABLES_CHAIN_PREFIX}_OUTPUT" 2>/dev/null; then
+            log "ERROR" "无法将 ${IPTABLES_CHAIN_PREFIX}_OUTPUT 链添加到 OUTPUT 链。"
+            return 1
+        fi
     fi
+    
     if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -C POSTROUTING -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I POSTROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING"
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -I POSTROUTING 1 -j "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null; then
+            log "ERROR" "无法将 ${IPTABLES_CHAIN_PREFIX}_POSTROUTING 链添加到 POSTROUTING 链。"
+            return 1
+        fi
     fi
+    
     if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -C FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null; then
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -I FORWARD 1 -j "${IPTABLES_CHAIN_PREFIX}_FORWARD"
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -I FORWARD 1 -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null; then
+            log "ERROR" "无法将 ${IPTABLES_CHAIN_PREFIX}_FORWARD 链添加到 FORWARD 链。"
+            return 1
+        fi
     fi
     
     # 检查是否使用ufw，如果是则添加ufw兼容性规则
@@ -682,23 +700,45 @@ create_pool() {
             iptables_compat_flag="--compat"
         fi
         
-        # 先删除可能存在的旧规则，再添加新规则，确保幂等性
+        # 添加PREROUTING DNAT规则
+        # 先尝试删除可能存在的旧规则，避免重复
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
+        # 添加新规则
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
+            log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加PREROUTING DNAT规则。"
+            return 1
+        fi
         
+        # 添加OUTPUT DNAT规则
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
+            log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加OUTPUT DNAT规则。"
+            return 1
+        fi
         
+        # 添加FORWARD规则
         comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-FWD-$subnet\""
+        # 允许从命名空间到外部的流量
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -s "$subnet" -j ACCEPT $comment_args 2>/dev/null; then
+            log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加FORWARD (outbound) 规则。"
+            return 1
+        fi
         
+        # 允许从外部到命名空间的流量
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -D "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -A "${IPTABLES_CHAIN_PREFIX}_FORWARD" -d "$subnet" -j ACCEPT $comment_args 2>/dev/null; then
+            log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加FORWARD (inbound) 规则。"
+            return 1
+        fi
         
+        # 添加POSTROUTING MASQUERADE规则
         comment_args="-m comment --comment \"${IPTABLES_COMMENT_PREFIX}-MASQ-$subnet\""
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args 2>/dev/null || true
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" -s "$subnet" -j MASQUERADE $comment_args 2>/dev/null; then
+            log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加POSTROUTING MASQUERADE规则。"
+            return 1
+        fi
 
         log "INFO" "✅ 实例 $i 创建成功，代理监听在 127.0.0.1:$host_port"
     done
@@ -799,32 +839,33 @@ except Exception as e:
         iptables_compat_flag="--compat"
     fi
     
-    # 增加重试机制和更详细的错误信息
-    local prerouting_rules=""
-    local forward_rules=""
-    
-    # 尝试获取PREROUTING链规则
-    if prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /') && [[ -n "$prerouting_rules" ]]; then
-        echo "$prerouting_rules"
-    else
-        # 如果直接获取失败，尝试不使用 --line-numbers
-        if prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n 2>/dev/null | grep "DNAT" | sed 's/^/     /') && [[ -n "$prerouting_rules" ]]; then
-            echo "$prerouting_rules"
-        else
-            log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题或规则不存在。"
-        fi
+    # 检查自定义链是否存在
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n >/dev/null 2>&1; then
+        log "WARNING" "     自定义链 ${IPTABLES_CHAIN_PREFIX}_PREROUTING 不存在。"
+        return
     fi
     
-    # 尝试获取FORWARD链规则
-    if forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /') && [[ -n "$forward_rules" ]]; then
+    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n >/dev/null 2>&1; then
+        log "WARNING" "     自定义链 ${IPTABLES_CHAIN_PREFIX}_FORWARD 不存在。"
+        return
+    fi
+    
+    # 获取并显示PREROUTING链中的DNAT规则
+    local prerouting_rules
+    prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n -v --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || true)
+    if [[ -n "$prerouting_rules" ]]; then
+        echo "$prerouting_rules"
+    else
+        log "WARNING" "     PREROUTING链中未找到DNAT规则。"
+    fi
+    
+    # 获取并显示FORWARD链中的ACCEPT规则
+    local forward_rules
+    forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n -v --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || true)
+    if [[ -n "$forward_rules" ]]; then
         echo "$forward_rules"
     else
-        # 如果直接获取失败，尝试不使用 --line-numbers
-        if forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n 2>/dev/null | grep "ACCEPT" | sed 's/^/     /') && [[ -n "$forward_rules" ]]; then
-            echo "$forward_rules"
-        else
-            log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题或规则不存在。"
-        fi
+        log "WARNING" "     FORWARD链中未找到ACCEPT规则。"
     fi
 }
 
