@@ -458,7 +458,7 @@ init_warp_instance() {
         # 增加更多的连接状态检查重试
         for i in {1..20}; do
             status_output=$(warp-cli --accept-tos status 2>/dev/null || true)
-            if echo "$status_output" | grep -q "Status: Connected"; then
+            if echo "$status_output" | grep -qE "Status: Connected|Status update: Connected"; then
                 echo "INFO: WARP连接成功！"
                 echo "$status_output"
                 exit 0
