@@ -179,7 +179,7 @@ cleanup_resources() {
             
             # 停止并清理WARP进程PID文件
             local warp_pid_file="${CONFIG_BASE_DIR}/${ns_name}/warp.pid"
-            if "${SUDO_CMD[@]}" [[ -f "$warp_pid_file" ]]; then
+            if "${SUDO_CMD[@]}" test -f "$warp_pid_file"; then
                 local warp_pid
                 warp_pid=$("${SUDO_CMD[@]}" cat "$warp_pid_file")
                 log "INFO" "     - 停止命名空间 $ns_name 中的WARP进程 (PID: $warp_pid)..."
@@ -338,13 +338,21 @@ check_dependencies() {
 
 register_warp_globally() {
     log "INFO" "🌐 检查全局WARP注册状态..."
-    if "${SUDO_CMD[@]}" [[ -s "/var/lib/cloudflare-warp/reg.json" ]]; then
+    if "${SUDO_CMD[@]}" test -s "/var/lib/cloudflare-warp/reg.json"; then
         log "INFO" "   ✅ 全局WARP已注册。"
         return 0
     fi
 
     log "INFO" "   - 全局WARP未注册，开始注册..."
     "${SUDO_CMD[@]}" mkdir -p /var/lib/cloudflare-warp && "${SUDO_CMD[@]}" chmod 700 /var/lib/cloudflare-warp
+    
+    # 检查是否有旧的注册，如果有则删除
+    if "${SUDO_CMD[@]}" test -f "/var/lib/cloudflare-warp/reg.json"; then
+        log "INFO" "   - 检测到旧的注册，正在删除..."
+        "${SUDO_CMD[@]}" warp-cli --accept-tos registration delete >/dev/null 2>&1 || true
+        sleep 2
+    fi
+    
     for attempt in {1..3}; do
         if "${SUDO_CMD[@]}" warp-cli --accept-tos registration new; then
             log "INFO" "   ✅ 全局WARP注册成功！"
