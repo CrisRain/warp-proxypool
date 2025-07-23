@@ -136,6 +136,15 @@ setup_iptables_chains() {
     if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" -C FORWARD -j "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null; then
         "${SUDO_CMD[@]}" "$IPTABLES_CMD" -I FORWARD 1 -j "${IPTABLES_CHAIN_PREFIX}_FORWARD"
     fi
+    
+    # 检查是否使用ufw，如果是则添加ufw兼容性规则
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
+        log "INFO" "检测到ufw防火墙，添加ufw兼容性规则..."
+        # 允许转发流量通过ufw
+        # 注意：这需要root权限，并且可能需要用户确认
+        echo "ufw allow in on any to any port 10800:10900 comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
+    fi
+    
     log "INFO" "✅ iptables自定义链已设置。"
 }
 
@@ -157,6 +166,14 @@ cleanup_iptables() {
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" -t nat -X "${IPTABLES_CHAIN_PREFIX}_POSTROUTING" 2>/dev/null || true
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" -F "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
     "${SUDO_CMD[@]}" "$IPTABLES_CMD" -X "${IPTABLES_CHAIN_PREFIX}_FORWARD" 2>/dev/null || true
+    
+    # 检查是否使用ufw，如果是则清理ufw规则
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
+        log "INFO" "检测到ufw防火墙，清理ufw规则..."
+        # 删除之前添加的ufw规则
+        # 注意：这需要root权限，并且可能需要用户确认
+        echo "ufw delete allow in on any to any port 10800:10900 comment 'WARP Proxy Pool'" | "${SUDO_CMD[@]}" bash || true
+    fi
     
     log "INFO" "✅ iptables规则清理完成。"
 }
