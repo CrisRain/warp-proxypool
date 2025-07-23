@@ -221,3 +221,5 @@ docker-compose up -d
 ```bash
 docker build -t warp-proxy-pool .
 ```
+
+注意：Dockerfile已经修复了`lsb_release`命令未找到的问题，现在可以正常构建。
