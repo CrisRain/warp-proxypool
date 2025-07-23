@@ -435,7 +435,7 @@ init_warp_instance() {
         
         echo "INFO: 尝试连接WARP..."
         # 增加重试机制
-        local connect_success=false
+        connect_success=false
         for connect_attempt in {1..3}; do
             if timeout 30s warp-cli --accept-tos connect; then
                 echo "INFO: WARP连接命令执行成功 (第 $connect_attempt 次尝试)。"
@@ -457,7 +457,6 @@ init_warp_instance() {
 
         # 增加更多的连接状态检查重试
         for i in {1..20}; do
-            local status_output
             status_output=$(warp-cli --accept-tos status 2>/dev/null || true)
             if echo "$status_output" | grep -q "Status: Connected"; then
                 echo "INFO: WARP连接成功！"
