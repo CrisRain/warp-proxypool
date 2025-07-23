@@ -154,7 +154,7 @@ cleanup_resources() {
 
     # 1. 清理配置文件
     log "INFO" "   - 清理 ${WARP_POOL_CONFIG_FILE}..."
-    "${SUDO_CMD[@]}" rm -f "$WARP_POOL_CONFIG_FILE"
+    "${SUDO_CMD[@]}" rm -f "$WARP_POOL_CONFIG_FILE" 2>/dev/null || true
     log "INFO" "   ✅ 配置文件已清理。"
 
     # 2. 清理iptables
@@ -179,7 +179,7 @@ cleanup_resources() {
                 warp_pid=$("${SUDO_CMD[@]}" cat "$warp_pid_file")
                 log "INFO" "     - 停止命名空间 $ns_name 中的WARP进程 (PID: $warp_pid)..."
                 "${SUDO_CMD[@]}" kill -9 "$warp_pid" >/dev/null 2>&1 || true
-                "${SUDO_CMD[@]}" rm -f "$warp_pid_file"
+                "${SUDO_CMD[@]}" rm -f "$warp_pid_file" 2>/dev/null || true
             fi
 
             # 卸载绑定挂载
@@ -204,7 +204,7 @@ cleanup_resources() {
             fi
             
             # 删除相关目录
-            "${SUDO_CMD[@]}" rm -rf "/etc/netns/$ns_name" "${CONFIG_BASE_DIR}/${ns_name}" "${IPC_BASE_DIR}/${ns_name}"
+            "${SUDO_CMD[@]}" rm -rf "/etc/netns/$ns_name" "${CONFIG_BASE_DIR}/${ns_name}" "${IPC_BASE_DIR}/${ns_name}" 2>/dev/null || true
         done
         log "INFO" "   ✅ 网络命名空间清理完成。"
     fi
@@ -217,7 +217,7 @@ cleanup_resources() {
 
     # 5. 清理锁文件
     log "INFO" "   - 清理锁文件..."
-    rm -f "$LOCK_FILE"
+    rm -f "$LOCK_FILE" 2>/dev/null || true
     log "INFO" "   ✅ 锁文件已清理。"
 
     log "INFO" "✅ 全面清理完成。"
@@ -450,7 +450,10 @@ init_warp_instance() {
         echo "ERROR: 连接WARP超时。"
         warp-cli --accept-tos status
         exit 1
-    ' bash "$ns_name" "$idx" "$warp_internal_port" "$warp_license_key" "$warp_endpoint" "$ns_log_file"
+    ' bash "$ns_name" "$idx" "$warp_internal_port" "$warp_license_key" "$warp_endpoint" "$ns_log_file" || {
+        log "ERROR" "WARP实例 $ns_name 初始化失败。中止代理池创建。"
+        return 1
+    }
 }
 
 refresh_warp_ip() {

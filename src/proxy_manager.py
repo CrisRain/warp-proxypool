@@ -136,6 +136,8 @@ def refresh_proxy_ip(backend_warp_port):
         # 获取脚本目录
         script_dir = os.path.dirname(os.path.abspath(__file__))
         manage_pool_script = os.path.join(script_dir, '..', 'manage_pool.sh')
+        # 转换为绝对路径
+        manage_pool_script = os.path.abspath(manage_pool_script)
         
         # 检查脚本是否存在
         if not os.path.exists(manage_pool_script):
@@ -152,7 +154,7 @@ def refresh_proxy_ip(backend_warp_port):
             logging.info(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新成功。")
             return True
         else:
-            logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新失败。错误: {result.stderr}")
+            logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新失败。返回码: {result.returncode}, 错误: {result.stderr}")
             return False
     except subprocess.TimeoutExpired:
         logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新超时。")
@@ -343,6 +345,18 @@ def _release_backend_port_after_socks_usage(backend_port_to_release, refresh_ip_
             logging.info(f"SOCKS清理: 端口 {backend_port_to_release} 已被使用 {usage_duration:.2f} 秒。")
         else:
             logging.warning(f"SOCKS清理警告: 在SOCKS释放期间，未在 'in_use_proxies' 中找到后端端口 {backend_port_to_release}。")
+            # 如果端口不在使用中，直接验证并返回到代理池
+            logging.info(f"SOCKS清理: 正在验证端口 {backend_port_to_release} 的可用性...")
+            is_valid = validate_proxy(backend_port_to_release)
+            with proxy_lock:
+                if is_valid:
+                    available_proxies.put(backend_port_to_release)
+                    logging.info(f"SOCKS清理: 后端端口 {backend_port_to_release} 验证成功，已返回代理池。")
+                else:
+                    # 如果验证失败，将代理端口重新放回队列的末尾，并记录错误
+                    logging.warning(f"SOCKS清理: 后端端口 {backend_port_to_release} 未能通过验证。将端口放回队列末尾以供后续重试。")
+                    available_proxies.put(backend_port_to_release)
+            return
 
     if refresh_ip_flag:
         threading.Thread(target=_refresh_and_return_task, args=(backend_port_to_release,)).start()
