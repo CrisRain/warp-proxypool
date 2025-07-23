@@ -794,21 +794,43 @@ def check_port_connectivity(host, port, timeout=5):
     except (socket.timeout, socket.error):
         return False
 
+def check_warp_proxy_port(ns, internal_port, timeout=5):
+    # 在命名空间内直接检查WARP代理端口是否监听
+    try:
+        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', ns, 'ss', '-tlnp'],
+                               capture_output=True, text=True, timeout=timeout)
+        if f':{internal_port} ' in result.stdout:
+            return True
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, Exception):
+        pass
+    return False
+
 try:
     with open(sys.argv[1]) as f:
         proxies = json.load(f)
     for p in proxies:
         ns = p['namespace']
         port = p['port']
-        # 检查端口连通性，而不是监听状态
-        # 因为实际的WARP服务在命名空间内部监听，主机上通过iptables DNAT转发
+        # 计算对应的内部端口
+        internal_port = 40000 + p['id']
+        
+        # 检查端口连通性
         try:
-            if check_port_connectivity('127.0.0.1', port):
+            # 增加超时时间以适应网络命名空间转发
+            if check_port_connectivity('127.0.0.1', port, timeout=15):
                 listen_status = '✅'
             else:
-                listen_status = '❌'
-        except Exception:
-            listen_status = '❌'
+                # 如果连通性检查失败，检查命名空间内端口是否监听
+                if check_warp_proxy_port(ns, internal_port, timeout=10):
+                    listen_status = '✅ (命名空间内监听)'
+                else:
+                    listen_status = '❌'
+        except Exception as e:
+            # 如果出现异常，仍然检查命名空间内端口是否监听
+            if check_warp_proxy_port(ns, internal_port, timeout=10):
+                listen_status = '✅ (命名空间内监听)'
+            else:
+                listen_status = f'❌ (错误: {str(e)})'
         
         # 检查WARP连接状态
         try:
