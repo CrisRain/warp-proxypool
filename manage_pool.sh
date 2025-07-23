@@ -833,39 +833,53 @@ except Exception as e:
 
     # 3. iptables 规则状态
     log "INFO" "   - iptables 规则摘要:"
+    # 重新检测iptables命令以确保使用正确的命令
+    local current_iptables_cmd="iptables"
+    if command -v iptables-legacy &> /dev/null; then
+        current_iptables_cmd="iptables-legacy"
+    elif command -v iptables-nft &> /dev/null; then
+        current_iptables_cmd="iptables-nft"
+    fi
+    
     # 检查是否在nftables模式下运行，如果是则使用兼容模式
     local iptables_compat_flag=""
-    if [[ "$IPTABLES_CMD" == "iptables-nft" ]] || [[ "$IPTABLES_CMD" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
+    if [[ "$current_iptables_cmd" == "iptables-nft" ]] || [[ "$current_iptables_cmd" == "iptables" && -n "$(iptables -V | grep -i nft)" ]]; then
         iptables_compat_flag="--compat"
     fi
     
     # 检查自定义链是否存在
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n >/dev/null 2>&1; then
+    local chains_exist=true
+    if ! "${SUDO_CMD[@]}" "$current_iptables_cmd" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n >/dev/null 2>&1; then
         log "WARNING" "     自定义链 ${IPTABLES_CHAIN_PREFIX}_PREROUTING 不存在。"
-        return
+        chains_exist=false
     fi
     
-    if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n >/dev/null 2>&1; then
+    if ! "${SUDO_CMD[@]}" "$current_iptables_cmd" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n >/dev/null 2>&1; then
         log "WARNING" "     自定义链 ${IPTABLES_CHAIN_PREFIX}_FORWARD 不存在。"
-        return
+        chains_exist=false
     fi
     
-    # 获取并显示PREROUTING链中的DNAT规则
-    local prerouting_rules
-    prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n -v --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || true)
-    if [[ -n "$prerouting_rules" ]]; then
-        echo "$prerouting_rules"
+    # 如果链存在，则获取并显示规则
+    if [[ "$chains_exist" == true ]]; then
+        # 获取并显示PREROUTING链中的DNAT规则
+        local prerouting_rules
+        prerouting_rules=$("${SUDO_CMD[@]}" "$current_iptables_cmd" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n -v --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || true)
+        if [[ -n "$prerouting_rules" ]]; then
+            echo "$prerouting_rules"
+        else
+            log "WARNING" "     PREROUTING链中未找到DNAT规则。"
+        fi
+        
+        # 获取并显示FORWARD链中的ACCEPT规则
+        local forward_rules
+        forward_rules=$("${SUDO_CMD[@]}" "$current_iptables_cmd" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n -v --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || true)
+        if [[ -n "$forward_rules" ]]; then
+            echo "$forward_rules"
+        else
+            log "WARNING" "     FORWARD链中未找到ACCEPT规则。"
+        fi
     else
-        log "WARNING" "     PREROUTING链中未找到DNAT规则。"
-    fi
-    
-    # 获取并显示FORWARD链中的ACCEPT规则
-    local forward_rules
-    forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n -v --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || true)
-    if [[ -n "$forward_rules" ]]; then
-        echo "$forward_rules"
-    else
-        log "WARNING" "     FORWARD链中未找到ACCEPT规则。"
+        log "WARNING" "     由于自定义链不存在，跳过规则详细检查。"
     fi
 }
 
