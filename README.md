@@ -150,3 +150,74 @@ sudo -E ./manage_pool.sh start
 
 - **`sudo` 权限:** `manage_pool.sh` 脚本需要 `sudo` 权限来管理系统级的网络资源。请确保您信任此脚本。
 - **`API_SECRET_TOKEN`:** 这个令牌是保护您 API 的关键。**切勿** 在生产环境中使用脚本自动生成的临时令牌。请务必设置一个强大、唯一的 `API_SECRET_TOKEN` 环境变量。任何能访问此 API 的人都可以使用您的代理资源。
+
+## 6. Docker 支持
+
+本项目支持通过Docker部署，这可以简化安装过程并提高环境一致性。预构建的镜像可通过 GitHub Packages 获取。
+
+### 6.1. 使用预构建的Docker镜像
+
+从GitHub Packages拉取预构建的镜像：
+
+```bash
+docker pull ghcr.io/crisrain/warp-proxypool:latest
+```
+
+### 6.2. 使用Docker运行
+
+由于项目需要网络命名空间和iptables权限，必须以特权模式运行：
+
+```bash
+docker run -d \
+  --name warp-proxy-pool \
+  --privileged \
+  --network host \
+  -e API_SECRET_TOKEN="your-super-secret-and-long-token" \
+  -e POOL_SIZE=3 \
+  -e BASE_PORT=10800 \
+  ghcr.io/crisrain/warp-proxypool:latest
+```
+
+### 6.3. 使用Docker Compose运行
+
+创建一个 `.env` 文件来设置环境变量：
+
+```bash
+API_SECRET_TOKEN=your-super-secret-and-long-token
+POOL_SIZE=3
+BASE_PORT=10800
+# 如果有WARP+许可证，可以设置
+# WARP_LICENSE_KEY=your-license-key
+```
+
+然后运行：
+
+```bash
+docker-compose up -d
+```
+
+### 6.4. Docker环境变量
+
+- `API_SECRET_TOKEN` (必需): API访问令牌
+- `POOL_SIZE` (可选): 代理池大小，默认为3
+- `BASE_PORT` (可选): SOCKS5代理的基础端口号，默认为10800
+- `WARP_LICENSE_KEY` (可选): WARP+许可证密钥
+- `WARP_ENDPOINT` (可选): 自定义WARP端点IP和端口
+- `WARP_CONFIG_BASE_DIR` (可选): WARP配置目录，默认为`/var/lib/warp-configs`
+- `WARP_IPC_BASE_DIR` (可选): WARP IPC目录，默认为`/run/warp-sockets`
+- `WARP_LOG_FILE` (可选): 日志文件路径，默认为`/var/log/warp-pool.log`
+
+### 6.5. 注意事项
+
+1. **特权模式**: 由于项目需要操作网络命名空间和iptables规则，必须使用 `--privileged` 标志。
+2. **主机网络**: 使用 `--network host` 以确保容器可以正确访问网络资源。
+3. **系统模块**: 容器需要访问 `/lib/modules` 以加载必要的内核模块。
+4. **持久化存储**: 使用Docker Compose时，配置、IPC和日志数据将存储在命名卷中，确保数据持久化。
+
+### 6.6. 构建自己的Docker镜像
+
+如果您需要构建自己的Docker镜像，可以使用项目中的Dockerfile：
+
+```bash
+docker build -t warp-proxy-pool .
+```

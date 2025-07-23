@@ -19,8 +19,13 @@ set -euo pipefail
 # WARP池配置
 POOL_SIZE="${POOL_SIZE:-3}"                 # 代理池大小 (可被环境变量覆盖)
 BASE_PORT="${BASE_PORT:-10800}"             # SOCKS5代理的基础端口号 (可被环境变量覆盖)
-WARP_LICENSE_KEY=""         # WARP+ 许可证密钥 (可选)
-WARP_ENDPOINT=""            # 自定义WARP端点IP和端口 (可选)
+WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"    # WARP+ 许可证密钥 (可被环境变量覆盖，可选)
+WARP_ENDPOINT="${WARP_ENDPOINT:-}"          # 自定义WARP端点IP和端口 (可被环境变量覆盖，可选)
+
+# 路径配置 (均可被环境变量覆盖)
+CONFIG_BASE_DIR="${WARP_CONFIG_BASE_DIR:-/var/lib/warp-configs}"  # WARP配置目录
+IPC_BASE_DIR="${WARP_IPC_BASE_DIR:-/run/warp-sockets}"            # WARP IPC目录
+LOG_FILE="${WARP_LOG_FILE:-/var/log/warp-pool.log}"               # 日志文件路径
 
 # 路径配置
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
