@@ -90,6 +90,8 @@ show_help() {
     echo "  restart     重启服务 (相当于 stop 后再 start)。"
     echo "  status      检查服务和网络资源的状态。"
     echo "  cleanup     仅清理所有网络资源，不影响正在运行的API服务。"
+    echo "  refresh-ip  刷新指定命名空间的WARP IP地址。"
+    echo "              用法: refresh-ip <namespace> <index>"
     echo "  start-api   仅启动API服务 (假设网络资源已存在)。"
     echo "              选项: --foreground  在前台运行API服务。"
     echo "  stop-api    仅停止API服务。"
@@ -380,10 +382,11 @@ init_warp_instance() {
         nohup warp-svc >/dev/null 2>&1 &
         # 使用pgrep获取更可靠的PID
         local warp_pid
-        for i in {1..5}; do
+        for i in {1..10}; do
             warp_pid=$(pgrep -n warp-svc)
             if [[ -n "$warp_pid" ]]; then break; fi
-            sleep 1
+            echo "INFO: 等待WARP守护进程启动... ($i/10)"
+            sleep 2
         done
         if [[ -z "$warp_pid" ]]; then
             echo "ERROR: 无法获取WARP守护进程的PID。"
@@ -391,7 +394,7 @@ init_warp_instance() {
         fi
         echo "$warp_pid" > /var/lib/cloudflare-warp/warp.pid
         echo "INFO: WARP守护进程已启动 (PID: $warp_pid)"
-        sleep 5
+        sleep 10
 
         for i in {1..10}; do
             if test -S /run/cloudflare-warp/warp_service; then break; fi
@@ -410,26 +413,84 @@ init_warp_instance() {
         [[ -n "$warp_endpoint" ]] && warp-cli --accept-tos tunnel endpoint set "$warp_endpoint"
         
         echo "INFO: 尝试连接WARP..."
-        if ! timeout 30s warp-cli --accept-tos connect; then
-            echo "ERROR: warp-cli connect 命令执行超时或失败。"
+        # 增加重试机制
+        local connect_success=false
+        for connect_attempt in {1..3}; do
+            if timeout 30s warp-cli --accept-tos connect; then
+                echo "INFO: WARP连接命令执行成功 (第 $connect_attempt 次尝试)。"
+                connect_success=true
+                break
+            else
+                echo "WARNING: WARP连接命令执行失败 (第 $connect_attempt 次尝试)。"
+                if [[ $connect_attempt -lt 3 ]]; then
+                    echo "INFO: 等待5秒后重试..."
+                    sleep 5
+                fi
+            fi
+        done
+        
+        if [[ "$connect_success" != true ]]; then
+            echo "ERROR: warp-cli connect 命令执行超时或失败，已重试3次。"
             exit 1
         fi
 
-        for i in {1..15}; do
-            status_output=$(warp-cli --accept-tos status)
+        # 增加更多的连接状态检查重试
+        for i in {1..20}; do
+            local status_output
+            status_output=$(warp-cli --accept-tos status 2>/dev/null || true)
             if echo "$status_output" | grep -q "Status: Connected"; then
                 echo "INFO: WARP连接成功！"
                 echo "$status_output"
                 exit 0
             fi
-            echo "INFO: 等待WARP连接... ($i/15)"
-            sleep 2
+            echo "INFO: 等待WARP连接... ($i/20)"
+            sleep 3
         done
         
         echo "ERROR: 连接WARP超时。"
         warp-cli --accept-tos status
         exit 1
     ' bash "$ns_name" "$idx" "$warp_internal_port" "$warp_license_key" "$warp_endpoint" "$ns_log_file"
+}
+
+refresh_warp_ip() {
+    local ns_name="$1"
+    local idx="$2"
+    
+    log "INFO" "🔄 正在为命名空间 $ns_name 刷新WARP IP..."
+    
+    # 在指定的网络命名空间中执行WARP CLI命令来刷新IP
+    if "${SUDO_CMD[@]}" ip netns exec "$ns_name" warp-cli --accept-tos disconnect >/dev/null 2>&1; then
+        log "INFO" "   - 已断开 $ns_name 中的WARP连接"
+    else
+        log "WARNING" "   - 断开 $ns_name 中的WARP连接失败"
+    fi
+    
+    # 等待一小段时间确保断开连接
+    sleep 2
+    
+    # 重新连接WARP
+    if "${SUDO_CMD[@]}" ip netns exec "$ns_name" warp-cli --accept-tos connect >/dev/null 2>&1; then
+        log "INFO" "   - 已在 $ns_name 中重新连接WARP"
+    else
+        log "WARNING" "   - 在 $ns_name 中重新连接WARP失败"
+        return 1
+    fi
+    
+    # 等待连接建立
+    for i in {1..15}; do
+        local status_output
+        status_output=$("${SUDO_CMD[@]}" ip netns exec "$ns_name" warp-cli --accept-tos status 2>/dev/null || true)
+        if echo "$status_output" | grep -q "Status: Connected"; then
+            log "INFO" "   ✅ $ns_name 中的WARP IP刷新成功"
+            return 0
+        fi
+        log "INFO" "   - 等待 $ns_name 中的WARP连接... ($i/15)"
+        sleep 2
+    done
+    
+    log "ERROR" "   ❌ $ns_name 中的WARP IP刷新超时"
+    return 1
 }
 
 create_pool() {
@@ -627,6 +688,17 @@ main() {
                 start_api "$foreground"
                 log "INFO" "🎉 服务启动完成。"
             ) 200>"$LOCK_FILE"
+            ;;
+        refresh-ip)
+            # 刷新指定命名空间的WARP IP
+            local ns_name="$2"
+            local idx="$3"
+            if [[ -z "$ns_name" || -z "$idx" ]]; then
+                log "ERROR" "refresh-ip 命令需要命名空间名称和索引参数。"
+                exit 1
+            fi
+            log "INFO" "命令: refresh-ip $ns_name $idx"
+            refresh_warp_ip "$ns_name" "$idx"
             ;;
         stop)
             (

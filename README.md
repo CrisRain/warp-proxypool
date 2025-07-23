@@ -87,6 +87,12 @@ pip install -r requirements.txt
   sudo ./manage_pool.sh cleanup
   ```
 
+- **刷新WARP IP:**
+  刷新指定命名空间的WARP IP地址。
+  ```bash
+  sudo ./manage_pool.sh refresh-ip ns0 0
+  ```
+
 ### 4.2. 与 API 交互 (`proxy_manager.py`)
 
 API 服务默认运行在 `5000` 端口。所有请求都需要一个安全令牌。

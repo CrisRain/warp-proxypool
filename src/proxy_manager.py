@@ -127,23 +127,39 @@ def refresh_proxy_ip(backend_warp_port):
         return False
     
     ns_name = instance_config['namespace']
+    idx = instance_config['id']
     
     logging.info(f"为端口 {backend_warp_port} (命名空间 {ns_name}) 请求IP刷新。")
     
-    # 移除了直接的 sudo 调用。IP刷新现在应该由一个外部的、有权限的脚本处理，
-    # 例如 'manage_pool.sh'。这里我们只记录这个意图。
-    logging.info(f"模拟IP刷新: 记录需要为命名空间 {ns_name} 刷新IP的事件。")
-    logging.warning(f"IP刷新逻辑已更改: 不再直接调用 'sudo'。请确保外部机制 (如 manage_pool.sh) "
-                    f"正在监控并处理IP刷新请求。")
-
-    # 假设外部脚本需要一些时间来完成刷新
-    logging.info(f"等待 {IP_REFRESH_WAIT} 秒，模拟外部脚本执行IP刷新...")
-    time.sleep(IP_REFRESH_WAIT)
-    
-    logging.info(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新流程已（模拟）完成。")
-    # 总是返回 True，因为实际的成功/失败取决于外部脚本。
-    # 后续的 validate_proxy 步骤将是真正的守门员。
-    return True
+    # 调用外部脚本刷新IP
+    try:
+        # 获取脚本目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        manage_pool_script = os.path.join(script_dir, '..', 'manage_pool.sh')
+        
+        # 检查脚本是否存在
+        if not os.path.exists(manage_pool_script):
+            logging.error(f"管理脚本 {manage_pool_script} 不存在。")
+            return False
+        
+        # 构造命令
+        cmd = ['sudo', manage_pool_script, 'refresh-ip', ns_name, str(idx)]
+        logging.info(f"执行IP刷新命令: {' '.join(cmd)}")
+        
+        # 执行命令
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0:
+            logging.info(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新成功。")
+            return True
+        else:
+            logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新失败。错误: {result.stderr}")
+            return False
+    except subprocess.TimeoutExpired:
+        logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新超时。")
+        return False
+    except Exception as e:
+        logging.error(f"端口 {backend_warp_port} ({ns_name}) 的IP刷新过程中发生错误: {e}")
+        return False
 
 def _refresh_and_return_task(port_to_refresh):
     """
@@ -332,9 +348,17 @@ def _release_backend_port_after_socks_usage(backend_port_to_release, refresh_ip_
         threading.Thread(target=_refresh_and_return_task, args=(backend_port_to_release,)).start()
         logging.info(f"SOCKS清理: 已为 {backend_port_to_release} 启动后台IP刷新任务。")
     else:
+        # 即使跳过IP刷新，也要验证代理的可用性
+        logging.info(f"SOCKS清理: 正在验证端口 {backend_port_to_release} 的可用性 (IP刷新被跳过)...")
+        is_valid = validate_proxy(backend_port_to_release)
         with proxy_lock:
-            available_proxies.put(backend_port_to_release)
-        logging.info(f"SOCKS清理: 后端端口 {backend_port_to_release} 已返回代理池 (IP刷新被跳过)。")
+            if is_valid:
+                available_proxies.put(backend_port_to_release)
+                logging.info(f"SOCKS清理: 后端端口 {backend_port_to_release} 验证成功，已返回代理池 (IP刷新被跳过)。")
+            else:
+                # 如果验证失败，将代理端口重新放回队列的末尾，并记录错误
+                logging.warning(f"SOCKS清理: 后端端口 {backend_port_to_release} 未能通过验证。将端口放回队列末尾以供后续重试。")
+                available_proxies.put(backend_port_to_release)
 
 def handle_socks_client_connection(client_socket, client_address_tuple):
     """处理单个SOCKS5客户端连接。"""
@@ -435,28 +459,40 @@ def handle_socks_client_connection(client_socket, client_address_tuple):
             elif "Host unreachable" in str(e_pysocks): socks_reply_code = REP_HOST_UNREACHABLE
             elif "Network is unreachable" in str(e_pysocks): socks_reply_code = REP_NETWORK_UNREACHABLE
             reply = struct.pack("!BBBB", SOCKS_VERSION, socks_reply_code, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
-            client_socket.sendall(reply)
+            try:
+                client_socket.sendall(reply)
+            except Exception as e_send:
+                logging.warning(f"SOCKS处理器 {client_ip_str}: 发送错误回复时失败: {e_send}")
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
         except socket.timeout:
             logging.warning(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 超时")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_TTL_EXPIRED, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
-            client_socket.sendall(reply)
+            try:
+                client_socket.sendall(reply)
+            except Exception as e_send:
+                logging.warning(f"SOCKS处理器 {client_ip_str}: 发送超时回复时失败: {e_send}")
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
         except socket.gaierror as e_dns:
             logging.warning(f"SOCKS处理器 {client_ip_str}: 目标 {target_host_str} 的DNS解析失败。错误: {e_dns}")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_HOST_UNREACHABLE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
-            client_socket.sendall(reply)
+            try:
+                client_socket.sendall(reply)
+            except Exception as e_send:
+                logging.warning(f"SOCKS处理器 {client_ip_str}: 发送DNS错误回复时失败: {e_send}")
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
         except Exception as e_conn_target:
             logging.error(f"SOCKS处理器 {client_ip_str}: 通过后端WARP {WARP_INSTANCE_IP}:{acquired_backend_port} 连接到 {target_host_str}:{target_port_int} 时发生未知错误。错误: {e_conn_target}")
             reply = struct.pack("!BBBB", SOCKS_VERSION, REP_GENERAL_FAILURE, 0x00, ATYP_IPV4) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
-            client_socket.sendall(reply)
+            try:
+                client_socket.sendall(reply)
+            except Exception as e_send:
+                logging.warning(f"SOCKS处理器 {client_ip_str}: 发送通用错误回复时失败: {e_send}")
             _release_backend_port_after_socks_usage(acquired_backend_port, refresh_ip_flag=False)
             acquired_backend_port = None
             return
