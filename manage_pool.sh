@@ -386,7 +386,7 @@ init_warp_instance() {
         echo "INFO: 启动WARP守护进程..."
         nohup warp-svc >/dev/null 2>&1 &
         # 使用pgrep获取更可靠的PID
-        local warp_pid
+        warp_pid=""
         for i in {1..10}; do
             warp_pid=$(pgrep -n warp-svc)
             if [[ -n "$warp_pid" ]]; then break; fi
