@@ -356,7 +356,7 @@ register_warp_globally() {
     for attempt in {1..3}; do
         if "${SUDO_CMD[@]}" warp-cli --accept-tos registration new; then
             log "INFO" "   ✅ 全局WARP注册成功！"
-            "${SUDO_CMD[@]}" warp-cli set-mode warp >/dev/null 2>&1
+            "${SUDO_CMD[@]}" warp-cli mode warp >/dev/null 2>&1
             "${SUDO_CMD[@]}" warp-cli disconnect >/dev/null 2>&1
             return 0
         fi
@@ -420,7 +420,7 @@ init_warp_instance() {
         fi
         
         echo "INFO: 设置代理模式并连接..."
-        warp-cli --accept-tos set-mode proxy
+        warp-cli --accept-tos mode proxy
         warp-cli --accept-tos proxy port "$warp_internal_port"
         [[ -n "$warp_license_key" ]] && warp-cli --accept-tos registration license "$warp_license_key"
         [[ -n "$warp_endpoint" ]] && warp-cli --accept-tos tunnel endpoint set "$warp_endpoint"
