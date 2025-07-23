@@ -16,49 +16,57 @@
 set -euo pipefail
 
 # --- 全局配置 ---
-# WARP池配置
-POOL_SIZE="${POOL_SIZE:-3}"                 # 代理池大小 (可被环境变量覆盖)
-BASE_PORT="${BASE_PORT:-10800}"             # SOCKS5代理的基础端口号 (可被环境变量覆盖)
-WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"    # WARP+ 许可证密钥 (可被环境变量覆盖，可选)
-WARP_ENDPOINT="${WARP_ENDPOINT:-}"          # 自定义WARP端点IP和端口 (可被环境变量覆盖，可选)
+init_global_config() {
+    # WARP池配置
+    POOL_SIZE="${POOL_SIZE:-3}"                 # 代理池大小 (可被环境变量覆盖)
+    BASE_PORT="${BASE_PORT:-10800}"             # SOCKS5代理的基础端口号 (可被环境变量覆盖)
+    WARP_LICENSE_KEY="${WARP_LICENSE_KEY:-}"    # WARP+ 许可证密钥 (可被环境变量覆盖，可选)
+    WARP_ENDPOINT="${WARP_ENDPOINT:-}"          # 自定义WARP端点IP和端口 (可被环境变量覆盖，可选)
 
-# 路径配置 (均可被环境变量覆盖)
-CONFIG_BASE_DIR="${WARP_CONFIG_BASE_DIR:-/var/lib/warp-configs}"  # WARP配置目录
-IPC_BASE_DIR="${WARP_IPC_BASE_DIR:-/run/warp-sockets}"            # WARP IPC目录
-LOG_FILE="${WARP_LOG_FILE:-/var/log/warp-pool.log}"               # 日志文件路径
+    # 路径配置 (均可被环境变量覆盖)
+    CONFIG_BASE_DIR="${WARP_CONFIG_BASE_DIR:-/var/lib/warp-configs}"  # WARP配置目录
+    IPC_BASE_DIR="${WARP_IPC_BASE_DIR:-/run/warp-sockets}"            # WARP IPC目录
+    LOG_FILE="${WARP_LOG_FILE:-/var/log/warp-pool.log}"               # 日志文件路径
 
-# 路径配置
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-CONFIG_BASE_DIR="/var/lib/warp-configs"  # WARP配置目录
-IPC_BASE_DIR="/run/warp-sockets"         # WARP IPC目录
-LOG_FILE="/var/log/warp-pool.log"        # 日志文件路径
-LOCK_FILE="/tmp/warp_pool_$(id -u).lock" # 用户隔离的锁文件
-PID_FILE="/tmp/proxy_manager_$(id -u).pid" # 用户隔离的API服务进程ID文件
-WARP_POOL_CONFIG_FILE="${SCRIPT_DIR}/src/warp_pool_config.json" # WARP池配置文件
+    # 路径配置
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    CONFIG_BASE_DIR="/var/lib/warp-configs"  # WARP配置目录
+    IPC_BASE_DIR="/run/warp-sockets"         # WARP IPC目录
+    LOG_FILE="/var/log/warp-pool.log"        # 日志文件路径
+    LOCK_FILE="/tmp/warp_pool_$(id -u).lock" # 用户隔离的锁文件
+    PID_FILE="/tmp/proxy_manager_$(id -u).pid" # 用户隔离的API服务进程ID文件
+    WARP_POOL_CONFIG_FILE="${SCRIPT_DIR}/src/warp_pool_config.json" # WARP池配置文件
 
-# Python应用配置
-VENV_DIR="${SCRIPT_DIR}/.venv"
-REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
-PROXY_MANAGER_SCRIPT="${SCRIPT_DIR}/src/proxy_manager.py"
-PYTHON_CMD="python3"
+    # Python应用配置
+    VENV_DIR="${SCRIPT_DIR}/.venv"
+    REQUIREMENTS_FILE="${SCRIPT_DIR}/requirements.txt"
+    PROXY_MANAGER_SCRIPT="${SCRIPT_DIR}/src/proxy_manager.py"
+    PYTHON_CMD="python3"
 
-# iptables配置
-IPTABLES_CHAIN_PREFIX="WARP_POOL"
-IPTABLES_COMMENT_PREFIX="WARP-POOL"
-IPTABLES_CMD="iptables" # 默认为iptables，可在依赖检查中被覆盖
+    # iptables配置
+    IPTABLES_CHAIN_PREFIX="WARP_POOL"
+    IPTABLES_COMMENT_PREFIX="WARP-POOL"
+    IPTABLES_CMD="iptables" # 默认为iptables，可在依赖检查中被覆盖
+}
 
 # --- SUDO权限处理 ---
-# 使用数组来安全地处理sudo命令和参数
-SUDO_CMD=()
-if [[ "$(id -u)" -ne 0 ]]; then
-    SUDO_CMD=(sudo)
-fi
-# 为了兼容旧的日志函数等少量不需要数组的地方，保留SUDO变量
-if [[ "$(id -u)" -ne 0 ]]; then
-    SUDO="sudo"
-else
-    SUDO=""
-fi
+init_sudo_config() {
+    # 使用数组来安全地处理sudo命令和参数
+    SUDO_CMD=()
+    if [[ "$(id -u)" -ne 0 ]]; then
+        SUDO_CMD=(sudo)
+    fi
+    # 为了兼容旧的日志函数等少量不需要数组的地方，保留SUDO变量
+    if [[ "$(id -u)" -ne 0 ]]; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+}
+
+# 初始化全局配置
+init_global_config
+init_sudo_config
 
 # --- 日志功能 ---
 log() {
