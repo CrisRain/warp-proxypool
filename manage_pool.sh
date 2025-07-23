@@ -560,14 +560,16 @@ init_warp_instance() {
         fi
 
         # 增加更多的连接状态检查重试
-        for i in {1..20}; do
+        for i in {1..30}; do
             status_output=$(warp-cli --accept-tos status 2>/dev/null || true)
             if echo "$status_output" | grep -qE "Status: Connected|Status update: Connected"; then
                 echo "INFO: WARP连接成功！"
                 echo "$status_output"
+                # 额外等待以确保连接稳定
+                sleep 3
                 exit 0
             fi
-            echo "INFO: 等待WARP连接... ($i/20)"
+            echo "INFO: 等待WARP连接... ($i/30)"
             sleep 3
         done
         
@@ -744,7 +746,7 @@ show_status() {
     else
         # 使用python解析json，更健壮
         local python_checker_code="
-import json, sys, os
+import json, sys, os, subprocess
 try:
     with open(sys.argv[1]) as f:
         proxies = json.load(f)
@@ -752,11 +754,20 @@ try:
         ns = p['namespace']
         port = p['port']
         # 检查端口监听
-        listen_cmd = f'ss -lntp | grep -q :{port}'
-        listen_status = '✅' if os.system(listen_cmd) == 0 else '❌'
+        try:
+            listen_result = subprocess.run(['ss', '-lntp'], capture_output=True, text=True, timeout=10)
+            listen_status = '✅' if f':{port}' in listen_result.stdout else '❌'
+        except (subprocess.TimeoutExpired, Exception):
+            listen_status = '❌'
+        
         # 检查WARP连接状态
-        warp_status_cmd = f'sudo ip netns exec {ns} warp-cli status | grep -q \"Status: Connected\"'
-        warp_status = '✅' if os.system(warp_status_cmd) == 0 else '❌'
+        try:
+            warp_result = subprocess.run(['sudo', 'ip', 'netns', 'exec', ns, 'warp-cli', '--accept-tos', 'status'],
+                                       capture_output=True, text=True, timeout=10)
+            warp_status = '✅' if 'Status: Connected' in warp_result.stdout else '❌'
+        except (subprocess.TimeoutExpired, Exception):
+            warp_status = '❌'
+            
         print(f\"     - 实例 {p['id']} ({ns}): 代理端口 127.0.0.1:{port} [监听: {listen_status}] | WARP连接 [状态: {warp_status}]\")
 except Exception as e:
     print(f'Error checking status: {e}', file=sys.stderr)
@@ -772,8 +783,21 @@ except Exception as e:
         iptables_compat_flag="--compat"
     fi
     
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题。"
-    "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题。"
+    local prerouting_rules
+    prerouting_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -L "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -n --line-numbers 2>/dev/null | grep "DNAT" | sed 's/^/     /' || true)
+    if [[ -n "$prerouting_rules" ]]; then
+        echo "$prerouting_rules"
+    else
+        log "WARNING" "     无法获取PREROUTING链规则，可能是因为nftables兼容性问题。"
+    fi
+    
+    local forward_rules
+    forward_rules=$("${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -L "${IPTABLES_CHAIN_PREFIX}_FORWARD" -n --line-numbers 2>/dev/null | grep "ACCEPT" | sed 's/^/     /' || true)
+    if [[ -n "$forward_rules" ]]; then
+        echo "$forward_rules"
+    else
+        log "WARNING" "     无法获取FORWARD链规则，可能是因为nftables兼容性问题。"
+    fi
 }
 
 
