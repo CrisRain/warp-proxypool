@@ -1,225 +1,192 @@
-# WARP 代理池管理器 (WARP Proxy Pool Manager)
+# WARP Proxy Pool
 
-## 1. 项目简介
+[![Docker Image CI](https://github.com/CrisRain/warp-proxypool/actions/workflows/docker-image.yml/badge.svg)](https://github.com/CrisRain/warp-proxypool/actions/workflows/docker-image.yml)
 
-本项目是一个功能强大的 WARP 代理池管理解决方案。它通过创建多个相互隔离的 Cloudflare WARP 实例，并提供一个统一的 API 和 SOCKS5 接口，来为您的应用程序提供高可用、可轮换的出口代理。
+这是一个功能强大的WARP代理池项目，旨在通过创建和管理多个Cloudflare WARP实例来提供高可用、高性能的SOCKS5代理服务。它利用Linux网络命名空间（Network Namespace）和`iptables`技术，为每个WARP实例创建一个完全隔离的网络环境，从而实现独立的IP出口。
 
-核心功能包括：
-- **多实例隔离:** 利用网络命名空间为每个 WARP 实例提供完全隔离的运行环境。
-- **统一访问入口:** 通过一个中央 SOCKS5 代理和一套 RESTful API 来管理和使用所有后端代理。
-- **自动 IP 轮换:** 在每次代理使用结束后，系统会自动刷新其 IP 地址，确保出口 IP 的多样性。
-- **生命周期管理:** 提供一个健壮的 `manage_pool.sh` 脚本来处理整个代理池的创建、启动、停止和清理。
-- **状态监控:** 可通过 API 实时查看代理池的状态。
+项目核心是一个用Python Flask编写的智能调度器，它不仅提供了一个中央SOCKS5代理入口，能自动将客户端请求路由到可用的后端WARP实例，还提供了一套RESTful API，允许客户端动态地获取和释放代理，并在释放后自动刷新IP地址，确保IP资源的高效利用和更新。
 
-## 2. 架构概述
+## ✨ 主要特性
 
-本系统由两个核心组件构成：`manage_pool.sh` 和 `proxy_manager.py`。
+- **多实例代理池**: 自动创建和管理一个由多个WARP实例组成的代理池。
+- **完全隔离**: 每个WARP实例运行在独立的网络命名空间中，拥有独立的网络栈和出口IP。
+- **智能SOCKS5调度**: 内置一个中央SOCKS5服务器，可自动从代理池中选择一个可用的WARP实例进行连接。
+- **动态API管理**:
+    - **获取/释放**: 提供RESTful API来动态获取和释放代理。
+    - **自动IP刷新**: 释放代理后，会自动在后台为该实例刷新IP地址，然后将其重新加入可用池。
+- **强大的管理脚本**: 提供一个统一的`manage_pool.sh`脚本，用于启动、停止、重启、清理和查看整个代理池的状态。
+- **Docker化部署**: 提供`Dockerfile`和`docker-compose.yml`，支持一键式容器化部署。
+- **灵活配置**: 支持通过环境变量自定义代理池大小、端口、WARP许可证密钥等。
+- **健壮的iptables管理**: 自动创建和清理所有必需的`iptables`规则，确保流量被正确转发。
 
-- **`manage_pool.sh` (资源管理器):**
-  这是一个 Bash 脚本，作为整个系统的基础。它负责所有底层资源的创建和管理，包括：
-  - 创建网络命名空间 (`ns0`, `ns1`, ...)。
-  - 在每个命名空间内独立运行 `warp-cli` 进程。
-  - 配置 `iptables` 规则，将主机的特定端口（如 `10800`, `10801`）映射到对应的 WARP 实例。
-  - 启动和停止 `proxy_manager.py` API 服务。
+## 🚀 工作原理
 
-- **`proxy_manager.py` (服务管理器):**
-  这是一个 Python 服务，提供面向应用的高层接口。它包含：
-  - **一个 Flask API 服务器:** 用于显式地获取和释放代理。
-  - **一个中央 SOCKS5 代理服务器:** 为客户端提供一个单一的、稳定的代理入口点。它会自动从后端池中选择一个可用实例进行连接。
+![架构图](https://raw.githubusercontent.com/CrisRain/warp-proxypool/main/assets/arch.png)
 
-- **`src/warp_pool_config.json` (配置文件):**
-  这个文件是 `manage_pool.sh` 和 `proxy_manager.py` 之间的通信桥梁。`manage_pool.sh` 在创建好代理池后，会将每个实例的端口等信息写入此文件，`proxy_manager.py` 在启动时读取它来初始化代理池。
+1.  **实例创建**: `manage_pool.sh`脚本创建指定数量的网络命名空间（例如`ns0`, `ns1`, ...）。
+2.  **网络隔离**: 为每个命名空间创建一对`veth`（虚拟以太网）设备，一端连接到主机，另一端在命名空间内部，从而建立独立的网络环境。
+3.  **WARP运行**: 在每个命名空间内，启动一个独立的`warp-cli`进程，并设置为代理模式，监听一个内部端口（例如`40000`, `40001`, ...）。
+4.  **流量转发**: `iptables`规则被设置为将主机上的特定端口（例如`10800`, `10801`, ...）的入站TCP流量`DNAT`到对应命名空间内的WARP代理端口。
+5.  **代理管理器**: `proxy_manager.py`脚本启动：
+    - 一个**Flask API服务器**，用于处理代理的获取（`/acquire`）和释放（`/release`）请求。
+    - 一个**中央SOCKS5服务器**（默认监听`10880`端口），它会从可用代理池中选择一个后端WARP实例来转发客户端的SOCKS5请求。
+6.  **生命周期管理**:
+    - **直接使用SOCKS5**: 客户端直接连接中央SOCKS5服务器，管理器会自动分配一个后端实例，使用完毕后自动释放并触发IP刷新。
+    - **通过API使用**: 客户端通过API获取一个代理（API返回中央SOCKS5服务器地址），使用完毕后调用API释放。释放后，该实例的IP将被刷新并重新加入可用池。
 
-**工作流程:** `manage_pool.sh` 构建底层网络设施，然后启动 `proxy_manager.py` 来管理这些设施并为上层应用提供服务。
+## ⚙️ 环境要求
 
-## 3. 安装与依赖
+- **操作系统**: Linux (需要支持网络命名空间和`iptables`)
+- **依赖**: `curl`, `iptables`, `iproute2`, `python3`, `sudo`
+- **推荐**: Docker 和 Docker Compose
 
-### 系统要求
-在运行此项目之前，请确保您的系统 (推荐 Ubuntu/Debian) 已安装以下依赖：
-- `warp-cli`: Cloudflare WARP 的官方命令行工具。
-- `iptables`: 用于配置网络规则。
-- `iproute2`: 提供 `ip` 命令，用于管理网络命名空间和设备。
-- `python3` 和 `python3-venv`
+## 快速开始
 
-### 安装依赖
-项目所需的 Python 依赖项在 `requirements.txt` 中定义。`manage_pool.sh` 脚本会在首次启动时自动创建虚拟环境并安装它们。
+### 使用 Docker Compose (推荐)
 
-如果您想手动安装，可以运行：
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+这是最简单、最推荐的部署方式。
 
-## 4. 使用方法
+1.  **克隆项目**:
+    ```bash
+    git clone https://github.com/CrisRain/warp-proxypool.git
+    cd warp-proxypool
+    ```
 
-**重要提示:** `manage_pool.sh` 脚本的大部分命令都需要 `sudo` 权限来操作网络资源。
+2.  **配置环境变量**:
+    创建一个`.env`文件，并根据需要设置以下变量：
+    ```env
+    # (必须) 设置一个安全的API访问令牌
+    API_SECRET_TOKEN=your_super_secret_token_here
 
-### 4.1. 管理代理池 (`manage_pool.sh`)
+    # (可选) 代理池的大小，默认为3
+    POOL_SIZE=5
 
-- **启动服务:**
-  此命令会清理任何旧的配置，创建新的代理池，并启动 API 服务。
-  ```bash
-  sudo ./manage_pool.sh start
-  ```
+    # (可选) 代理池的起始端口，默认为10800
+    # 代理将监听从 BASE_PORT 到 BASE_PORT + POOL_SIZE - 1 的端口
+    BASE_PORT=10800
 
-- **停止服务:**
-  此命令会停止 API 服务并清理所有相关的网络资源（命名空间、iptables 规则等）。
-  ```bash
-  sudo ./manage_pool.sh stop
-  ```
+    # (可选) 你的WARP+许可证密钥，以获取更好的性能
+    WARP_LICENSE_KEY=YOUR_WARP_PLUS_LICENSE_KEY
 
-- **重启服务:**
-  相当于 `stop` 后再 `start`。
-  ```bash
-  sudo ./manage_pool.sh restart
-  ```
+    # (可选) 自定义WARP端点IP和端口
+    # WARP_ENDPOINT=162.159.192.1:2408
+    ```
 
-- **查看状态:**
-  检查 API 服务和网络资源的当前状态。
-  ```bash
-  ./manage_pool.sh status
-  ```
+3.  **启动服务**:
+    ```bash
+    docker-compose up -d
+    ```
 
-- **清理资源:**
-  仅清理网络资源，不会停止正在运行的 API 服务。
-  ```bash
-  sudo ./manage_pool.sh cleanup
-  ```
+4.  **查看状态**:
+    ```bash
+    docker-compose logs -f
+    ```
 
-- **刷新WARP IP:**
-  刷新指定命名空间的WARP IP地址。
-  ```bash
-  sudo ./manage_pool.sh refresh-ip ns0 0
-  ```
+### 使用 `manage_pool.sh` 脚本 (手动部署)
 
-### 4.2. 与 API 交互 (`proxy_manager.py`)
+如果你希望在主机上直接运行，可以使用管理脚本。
 
-API 服务默认运行在 `5000` 端口。所有请求都需要一个安全令牌。
+1.  **克隆项目**:
+    ```bash
+    git clone https://github.com/CrisRain/warp-proxypool.git
+    cd warp-proxypool
+    ```
 
-**安全令牌 (`API_SECRET_TOKEN`):**
-为了安全，您必须在启动服务前设置一个环境变量 `API_SECRET_TOKEN`。
-```bash
-export API_SECRET_TOKEN="your-super-secret-and-long-token"
-sudo -E ./manage_pool.sh start
-```
-**注意:** `sudo` 默认不会传递环境变量，使用 `-E` 选项来保留它们。
+2.  **安装依赖**:
+    确保你已经安装了`curl`, `iptables`, `iproute2`, `python3`, `python3-pip`, `sudo`。
 
-#### **端点:**
+3.  **设置环境变量 (可选)**:
+    你可以在运行脚本前导出环境变量来覆盖默认配置。
+    ```bash
+    export POOL_SIZE=5
+    export BASE_PORT=10800
+    export API_SECRET_TOKEN="your_secret_token"
+    ```
 
-- **`GET /acquire`**
-  获取一个代理的使用权。
-  ```bash
-  curl -X GET http://127.0.0.1:5000/acquire \
-       -H "Authorization: Bearer your-super-secret-and-long-token"
-  ```
-  **成功响应:**
-  ```json
-  {
-    "proxy_to_use": "socks5://127.0.0.1:10880",
-    "backend_port_token_for_release": 10801,
-    "message": "请连接到中央SOCKS5服务器 '127.0.0.1:10880'。 调用 /release 接口时请使用 'backend_port_token_for_release' (10801)。"
-  }
-  ```
-  您的应用程序现在应该通过 `proxy_to_use` 指定的地址进行连接。请务必保存 `backend_port_token_for_release` 的值。
+4.  **启动服务**:
+    脚本需要`sudo`权限来管理网络资源。
+    ```bash
+    sudo ./manage_pool.sh start
+    ```
 
-- **`POST /release/<backend_port_token>`**
-  释放一个已获取的代理，并触发其 IP 刷新。
-  ```bash
-  curl -X POST http://127.0.0.1:5000/release/10801 \
-       -H "Authorization: Bearer your-super-secret-and-long-token"
-  ```
-  **成功响应:**
-  ```json
-  {
-    "status": "已为后端端口 10801 发起释放和IP刷新流程"
-  }
-  ```
+## 📖 使用方法
 
-- **`GET /status`**
-  获取代理池的当前状态（此接口无需认证）。
-  ```bash
-  curl http://127.0.0.1:5000/status
-  ```
+### 1. 直接使用中央SOCKS5代理
 
-### 4.3. 直接使用中央 SOCKS5 代理
+你可以将你的应用程序直接配置为使用中央SOCKS5代理。管理器会自动处理后端实例的分配和回收。
 
-对于不支持调用 API 的客户端，您可以直接将其 SOCKS5 代理设置为 API 服务器的地址和端口（默认为 `127.0.0.1:10880`）。`proxy_manager` 会在每次新连接时自动分配一个后端 WARP 实例，并在连接结束后自动释放和刷新它。
+- **地址**: `127.0.0.1` (或你的服务器IP)
+- **端口**: `10880` (默认)
 
-## 5. 安全注意事项
+每次新的SOCKS5连接都会从池中获取一个可用的WARP实例。连接断开后，该实例会被自动释放，并触发后台IP刷新任务。
 
-- **`sudo` 权限:** `manage_pool.sh` 脚本需要 `sudo` 权限来管理系统级的网络资源。请确保您信任此脚本。
-- **`API_SECRET_TOKEN`:** 这个令牌是保护您 API 的关键。**切勿** 在生产环境中使用脚本自动生成的临时令牌。请务必设置一个强大、唯一的 `API_SECRET_TOKEN` 环境变量。任何能访问此 API 的人都可以使用您的代理资源。
+### 2. 通过API管理代理
 
-## 6. Docker 支持
+通过API，你可以获得对代理生命周期更精细的控制。
 
-本项目支持通过Docker部署，这可以简化安装过程并提高环境一致性。预构建的镜像可通过 GitHub Packages 获取。
+#### 获取API令牌
 
-### 6.1. 使用预构建的Docker镜像
+API使用Bearer Token进行认证。令牌通过环境变量`API_SECRET_TOKEN`设置。如果未设置，系统会在启动时生成一个临时令牌并显示在日志中。
 
-从GitHub Packages拉取预构建的镜像：
+#### API端点
 
-```bash
-docker pull ghcr.io/crisrain/warp-proxypool:latest
-```
+- **`GET /status`**: 获取代理池的当前状态。
+- **`GET /acquire`**: 获取一个可用的代理。
+- **`POST /release/<backend_port_token>`**: 释放一个已获取的代理并触发IP刷新。
 
-### 6.2. 使用Docker运行
+#### 使用示例 (`curl`)
 
-由于项目需要网络命名空间和iptables权限，必须以特权模式运行：
+假设API服务运行在`http://127.0.0.1:5000`，你的令牌是`mysecret`。
 
-```bash
-docker run -d \
-  --name warp-proxy-pool \
-  --privileged \
-  --network host \
-  -e API_SECRET_TOKEN="your-super-secret-and-long-token" \
-  -e POOL_SIZE=3 \
-  -e BASE_PORT=10800 \
-  ghcr.io/crisrain/warp-proxypool:latest
-```
+1.  **查看状态**:
+    ```bash
+    curl http://127.0.0.1:5000/status
+    ```
 
-### 6.3. 使用Docker Compose运行
+2.  **获取一个代理**:
+    ```bash
+    curl -X GET http://127.0.0.1:5000/acquire \
+         -H "Authorization: Bearer mysecret"
+    ```
+    **成功响应**:
+    ```json
+    {
+      "proxy_to_use": "socks5://127.0.0.1:10880",
+      "backend_port_token_for_release": 10801,
+      "message": "请连接到中央SOCKS5服务器 '127.0.0.1:10880'。 调用 /release 接口时请使用 'backend_port_token_for_release' (10801)。"
+    }
+    ```
+    **注意**: API返回的是**中央SOCKS5服务器地址**。你的请求将被路由到为你分配的后端实例（此例中是`10801`对应的实例）。
 
-创建一个 `.env` 文件来设置环境变量：
+3.  **释放代理**:
+    当你使用完代理后，使用上一步获取的`backend_port_token_for_release`来释放它。
+    ```bash
+    curl -X POST http://127.0.0.1:5000/release/10801 \
+         -H "Authorization: Bearer mysecret"
+    ```
+    **成功响应**:
+    ```json
+    {
+      "status": "已为后端端口 10801 发起释放和IP刷新流程"
+    }
+    ```
+    释放后，该实例将进入IP刷新流程，成功后会重新加入可用代理池。
 
-```bash
-API_SECRET_TOKEN=your-super-secret-and-long-token
-POOL_SIZE=3
-BASE_PORT=10800
-# 如果有WARP+许可证，可以设置
-# WARP_LICENSE_KEY=your-license-key
-```
+## 🛠️ 管理脚本 `manage_pool.sh`
 
-然后运行：
+`manage_pool.sh`是管理服务生命周期的核心工具。
 
-```bash
-docker-compose up -d
-```
+**用法**: `sudo ./manage_pool.sh <命令>`
 
-### 6.4. Docker环境变量
+- **`start`**: 启动整个服务。如果已有资源存在，会先清理再创建。
+- **`stop`**: 停止API服务并清理所有网络资源（命名空间、iptables规则等）。
+- **`restart`**: 重启服务（相当于`stop`后`start`）。
+- **`status`**: 检查API服务和每个代理实例的运行状态。
+- **`cleanup`**: 仅清理所有网络资源，不停止正在运行的API服务。
+- **`start-api`**: 仅启动API服务（假设网络资源已存在）。
+- **`stop-api`**: 仅停止API服务。
+- **`refresh-ip <namespace> <index>`**: 手动刷新指定命名空间实例的IP。
 
-- `API_SECRET_TOKEN` (必需): API访问令牌
-- `POOL_SIZE` (可选): 代理池大小，默认为3
-- `BASE_PORT` (可选): SOCKS5代理的基础端口号，默认为10800
-- `WARP_LICENSE_KEY` (可选): WARP+许可证密钥
-- `WARP_ENDPOINT` (可选): 自定义WARP端点IP和端口
-- `WARP_CONFIG_BASE_DIR` (可选): WARP配置目录，默认为`/var/lib/warp-configs`
-- `WARP_IPC_BASE_DIR` (可选): WARP IPC目录，默认为`/run/warp-sockets`
-- `WARP_LOG_FILE` (可选): 日志文件路径，默认为`/var/log/warp-pool.log`
+## 📄 许可证
 
-### 6.5. 注意事项
-
-1. **特权模式**: 由于项目需要操作网络命名空间和iptables规则，必须使用 `--privileged` 标志。
-2. **主机网络**: 使用 `--network host` 以确保容器可以正确访问网络资源。
-3. **系统模块**: 容器需要访问 `/lib/modules` 以加载必要的内核模块。
-4. **持久化存储**: 使用Docker Compose时，配置、IPC和日志数据将存储在命名卷中，确保数据持久化。
-
-### 6.6. 构建自己的Docker镜像
-
-如果您需要构建自己的Docker镜像，可以使用项目中的Dockerfile：
-
-```bash
-docker build -t warp-proxy-pool .
-```
-
-注意：Dockerfile已经修复了`lsb_release`命令未找到的问题，现在可以正常构建。
+本项目根据 [MIT License](LICENSE) 授权。
