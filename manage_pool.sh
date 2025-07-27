@@ -50,15 +50,15 @@ init_global_config() {
 }
 
 # --- SUDO权限处理 ---
-init_sudo_config() {
-    # 使用数组来安全地处理sudo命令和参数
+init__config() {
+    # 使用数组来安全地处理命令和参数
     SUDO_CMD=()
     if [[ "$(id -u)" -ne 0 ]]; then
-        SUDO_CMD=(sudo)
+        SUDO_CMD=()
     fi
     # 为了兼容旧的日志函数等少量不需要数组的地方，保留SUDO变量
     if [[ "$(id -u)" -ne 0 ]]; then
-        SUDO="sudo"
+        SUDO=""
     else
         SUDO=""
     fi
@@ -66,7 +66,7 @@ init_sudo_config() {
 
 # 初始化全局配置
 init_global_config
-init_sudo_config
+init__config
 
 # --- 日志功能 ---
 log() {
@@ -111,8 +111,8 @@ show_help() {
     echo "  help        显示此帮助信息。"
     echo ""
     echo "示例:"
-    echo "  sudo ./manage_pool.sh start"
-    echo "  sudo ./manage_pool.sh stop"
+    echo "   ./manage_pool.sh start"
+    echo "   ./manage_pool.sh stop"
     echo "  ./manage_pool.sh status"
 }
 
@@ -214,6 +214,10 @@ cleanup_iptables() {
 # --- 资源清理 ---
 cleanup_resources() {
     log "INFO" "🧹 开始全面清理网络资源..."
+
+    # 清理持久化的iptables规则文件
+    log "INFO" "   - 清理持久化的iptables规则文件..."
+    "${SUDO_CMD[@]}" rm -f /etc/iptables/rules.v4 2>/dev/null || true
 
     # 1. 清理配置文件
     log "INFO" "   - 清理 ${WARP_POOL_CONFIG_FILE}..."
@@ -761,6 +765,18 @@ create_pool() {
     
     echo "$json_content" > "$WARP_POOL_CONFIG_FILE"
     log "INFO" "✅ ${WARP_POOL_CONFIG_FILE} 已生成。"
+
+    # --- 持久化 iptables 规则 ---
+    log "INFO" "💾 持久化iptables规则..."
+    if ! "${SUDO_CMD[@]}" mkdir -p /etc/iptables; then
+        log "ERROR" "无法创建 /etc/iptables 目录。"
+        return 1
+    fi
+    if ! "${SUDO_CMD[@]}" iptables-save > /etc/iptables/rules.v4; then
+        log "ERROR" "无法使用 iptables-save 保存规则。"
+        return 1
+    fi
+    log "INFO" "✅ iptables规则已保存到 /etc/iptables/rules.v4"
 }
 
 # --- 状态检查 ---
@@ -797,7 +813,7 @@ def check_port_connectivity(host, port, timeout=5):
 def check_warp_proxy_port(ns, internal_port, timeout=5):
     # 在命名空间内直接检查WARP代理端口是否监听
     try:
-        result = subprocess.run(['sudo', 'ip', 'netns', 'exec', ns, 'ss', '-tlnp'],
+        result = subprocess.run(['', 'ip', 'netns', 'exec', ns, 'ss', '-tlnp'],
                                capture_output=True, text=True, timeout=timeout)
         if f':{internal_port} ' in result.stdout:
             return True
@@ -834,7 +850,7 @@ try:
         
         # 检查WARP连接状态
         try:
-            warp_result = subprocess.run(['sudo', 'ip', 'netns', 'exec', ns, 'warp-cli', '--accept-tos', 'status'],
+            warp_result = subprocess.run(['', 'ip', 'netns', 'exec', ns, 'warp-cli', '--accept-tos', 'status'],
                                        capture_output=True, text=True, timeout=10)
             # 检查输出中是否包含Connected状态
             if 'Connected' in warp_result.stdout:
@@ -924,10 +940,10 @@ main() {
     "${SUDO_CMD[@]}" touch "$LOG_FILE"
     "${SUDO_CMD[@]}" chmod 640 "$LOG_FILE"
 
-    # 启动sudo会话保持
+    # 启动会话保持
     if [[ -n "$SUDO" ]]; then
-        log "INFO" "启动sudo会话保持进程..."
-        # 检查是否可以无密码sudo
+        log "INFO" "启动会话保持进程..."
+        # 检查是否可以无密码
         if "${SUDO_CMD[@]}" -n true 2>/dev/null; then
             while true; do "${SUDO_CMD[@]}" -n true; sleep 60; kill -0 "$$" || exit; done &>/dev/null &
             SUDO_KEEPALIVE_PID=$!
@@ -943,7 +959,7 @@ main() {
 
     # 检查root权限，但允许status和help命令
     if [[ "$action" != "status" && "$action" != "help" && "$EUID" -ne 0 ]]; then
-        log "ERROR" "此命令需要root权限。请使用 'sudo' 运行。"
+        log "ERROR" "此命令需要root权限。请使用 '' 运行。"
         exit 1
     fi
 
