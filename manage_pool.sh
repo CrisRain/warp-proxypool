@@ -700,18 +700,18 @@ create_pool() {
             iptables_compat_flag="--compat"
         fi
         
-        # 添加PREROUTING DNAT规则
+        # 添加PREROUTING DNAT规则 (仅匹配发往本机的流量)
         # 先尝试删除可能存在的旧规则，避免重复
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -m addrtype --dst-type LOCAL -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
         # 添加新规则
-        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_PREROUTING" -m addrtype --dst-type LOCAL -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
             log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加PREROUTING DNAT规则。"
             return 1
         fi
         
-        # 添加OUTPUT DNAT规则
-        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
-        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -p tcp -d 127.0.0.1 --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
+        # 添加OUTPUT DNAT规则 (仅匹配发往本机的流量)
+        "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -D "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -m addrtype --dst-type LOCAL -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null || true
+        if ! "${SUDO_CMD[@]}" "$IPTABLES_CMD" $iptables_compat_flag -t nat -A "${IPTABLES_CHAIN_PREFIX}_OUTPUT" -m addrtype --dst-type LOCAL -p tcp --dport "$host_port" -j DNAT --to-destination "$namespace_ip:$warp_internal_port" $comment_args 2>/dev/null; then
             log "ERROR" "无法为实例 $i (命名空间: $ns_name) 添加OUTPUT DNAT规则。"
             return 1
         fi
